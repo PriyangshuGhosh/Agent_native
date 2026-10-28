@@ -63,15 +63,23 @@ Every gate script:
 - When the gate passes, commit and tag it: `git tag cycle-0N`.
 - Repair budget: 3 attempts per cycle. After that, stop, write up the blocker in `docs/`, and propose a fallback.
 - Gates must be deterministic. Live Gemini output is not, so gates replay recorded responses (see Decisions).
-- Repo layout: `agent-init/` `agentd/` `kernel/` `rootfs/` `iso/` `tests/` `docs/` `overview/` (spec).
+- Repo layout: `agent-init/` `agentd/` `kernel/` `rootfs/` `iso/` `scripts/` `tests/` `docs/` `overview/` (spec).
 
 ## Decisions (resolved open questions, 2026-10-28)
 All proposed defaults were accepted, with these pins:
 - **Item 1 — Cycle 01 harness:** Cycle 01 runs inside a disposable minimal QEMU guest with KVM
   (`-snapshot`, no NIC), so uinput events never reach the host desktop.
-- **Item 2:** proposed default accepted (wording not preserved in the repo; fill in if it matters).
+- **Item 2 — compositor runtime:** compositor runs with headless display backend (`WLR_BACKENDS=headless`)
+  with device input enabled as root, without a login manager. In practice this is
+  `WLR_BACKENDS=headless,libinput` + `LIBSEAT_BACKEND=noop`, because uinput events reach cage only through libinput.
 - **Items 3/4/5 — compositor, rootfs, test app:** `cage` is the kiosk compositor. It runs one app
   maximized, so the window origin is always (0,0) and no Wayland coordinate offset is needed.
   The rootfs is built from Alpine Linux packages. The Tier 3 test app is `mousepad` (GTK3).
 - **Item 6 — model:** pinned to `gemini-2.5-flash`. Gate scripts use recorded/mocked responses only.
   Live API calls are a separate, non-gated validation test.
+
+## Cycle status
+| # | Status | Notes |
+|---|--------|-------|
+| 01 | **PASSED** (tag `cycle-01`) | Build: `scripts/build-harness.sh` (no root; Alpine v3.24 via `apk.static --usermode` + fakeroot). Gate: `tests/gate-01.sh` boots `build/harness/` under KVM in about 3 s. Probe: `rootfs/harness/run-primitives.py`. It measured screencopy at ~62 FPS. Repairs used: 3/3 (missing baselayout, missing SVG pixbuf loader, AT-SPI `get_text` shadowing). |
+| 02 | next | agent-init.c, mounts, reaping, kernel defconfig, QEMU boot. Start it in a new session. |

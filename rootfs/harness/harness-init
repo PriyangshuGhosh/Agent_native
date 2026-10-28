@@ -1,0 +1,24 @@
+#!/bin/sh
+# PID 1 of the disposable Cycle 01 harness guest (stand-in until agent-init lands in Cycle 02).
+mount -t proc proc /proc
+mount -t sysfs sys /sys
+mount -t tmpfs run /run
+mount -t tmpfs tmp /tmp
+mkdir -p /dev/pts /dev/shm
+mount -t devpts devpts /dev/pts
+mount -t tmpfs shm /dev/shm
+modprobe uinput
+
+LOG=/tmp/harness.log
+# Post-install hooks were skipped at build time (apk --no-scripts); the image is -snapshot, so redo per boot.
+{
+	glib-compile-schemas /usr/share/glib-2.0/schemas
+	gdk-pixbuf-query-loaders --update-cache
+	update-mime-database /usr/share/mime
+	udevd --daemon
+	udevadm trigger --action=add
+	udevadm settle
+} >>"$LOG" 2>&1
+
+python3 /usr/local/bin/run-primitives.py
+poweroff -f

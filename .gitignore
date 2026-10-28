@@ -9,3 +9,4 @@
 *.cpio*
 *.qcow2
 target/
+__pycache__/
