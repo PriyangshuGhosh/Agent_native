@@ -82,4 +82,5 @@ All proposed defaults were accepted, with these pins:
 | # | Status | Notes |
 |---|--------|-------|
 | 01 | **PASSED** (tag `cycle-01`) | Build: `scripts/build-harness.sh` (no root; Alpine v3.24 via `apk.static --usermode` + fakeroot). Gate: `tests/gate-01.sh` boots `build/harness/` under KVM in about 3 s. Probe: `rootfs/harness/run-primitives.py`. It measured screencopy at ~62 FPS. Repairs used: 3/3 (missing baselayout, missing SVG pixbuf loader, AT-SPI `get_text` shadowing). |
-| 02 | next | agent-init.c, mounts, reaping, kernel defconfig, QEMU boot. Start it in a new session. |
+| 02 | **PASSED** (tag `cycle-02`) | Build: `scripts/build-initramfs-02.sh` (static glibc `agent-init`, Alpine `linux-virt` kernel, cpio holding only `/usr/bin/agent-init`, `rdinit=`). Gate: `tests/gate-02.sh` gives `PID1_READY` at ~270–290 ms. Mounts are read back from `/proc/self/mounts`, the fork/reap self-test passes with 0 zombies, PID 1 is the only user process, and QEMU exits 0 via `RB_POWER_OFF`. Repairs used: 1/3 (SeaBIOS left an unterminated serial line). Deferred: our own kernel defconfig; Alpine's virt kernel is used for now. |
+| 03 | next | D-Bus + compositor in rootfs, launched by PID 1. Start it in a new session. |

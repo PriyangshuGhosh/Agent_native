@@ -1,0 +1,2 @@
+[    0.000000] kernel noise the gate must ignore
+{"ts_ms":412,"event":"PID1_READY","pid":1,"comm":"agent-init","mounts":{"/proc":"proc","/sys":"sysfs","/dev":"devtmpfs","/dev/pts":"devpts","/run":"tmpfs","/tmp":"tmpfs"},"reap_test":{"pid":2,"reaped":true},"zombies":0,"user_procs":1}
