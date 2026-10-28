@@ -1,10 +1,12 @@
 
-{"ts_ms":384,"event":"PID1_READY","pid":1,"comm":"agent-init","mounts":{"/proc":"proc","/sys":"sysfs","/dev":"devtmpfs","/dev/pts":"devpts","/run":"tmpfs","/tmp":"tmpfs"},"reap_test":{"pid":464,"reaped":true},"zombies":0,"user_procs":1}
-{"ts_ms":2109,"event":"AGENTD_READY","pid":828,"bus":"/run/user/0/bus","wayland":"/run/user/0/wayland-0"}
-{"ts_ms":2110,"event":"CAPABILITY_VERIFIED","tier":1,"primitive":"ffi_compute","status":"ok","expected":12586269025,"actual":12586269025,"latency_ms":0.069,"budget_ms":1.0}
-{"ts_ms":2110,"event":"TIER1_PASS","primitive":"ffi_compute","latency_ms":0.069,"budget_ms":1.0}
-{"ts_ms":2116,"event":"CAPABILITY_VERIFIED","tier":2,"primitive":"headless_pipe","status":"ok","expected":"AGENTD TIER2 PIPE\n","actual":"AGENTD TIER2 PIPE\n","latency_ms":5.625,"budget_ms":50.0}
-{"ts_ms":2116,"event":"TIER2_PASS","primitive":"headless_pipe","latency_ms":5.625,"budget_ms":50.0}
-{"ts_ms":2696,"event":"CAPABILITY_VERIFIED","tier":3,"primitive":"atspi_ui","status":"ok","expected":"agentd-tier3","actual":"agentd-tier3","latency_ms":4.3,"budget_ms":20.0}
-{"ts_ms":2696,"event":"TIER3_PASS","primitive":"atspi_ui","latency_ms":4.3,"budget_ms":20.0}
+{"ts_ms":311,"event":"PID1_READY","pid":1,"comm":"agent-init","mounts":{"/proc":"proc","/sys":"sysfs","/dev":"devtmpfs","/dev/pts":"devpts","/run":"tmpfs","/tmp":"tmpfs"},"reap_test":{"pid":464,"reaped":true},"zombies":0,"user_procs":1,"cmdline":"root=/dev/vda console=ttyS0 quiet loglevel=0 panic=0"}
+{"ts_ms":317,"event":"STORAGE_READY","base_ro":false,"overlay":false,"persistent":false,"root":"ext4","base":"","upper":""}
+{"ts_ms":1181,"event":"AGENTD_READY","pid":829,"bus":"/run/user/0/bus","wayland":"/run/user/0/wayland-0"}
+{"ts_ms":1182,"event":"CAPABILITY_VERIFIED","tier":1,"primitive":"ffi_compute","status":"ok","expected":12586269025,"actual":12586269025,"latency_ms":0.05,"budget_ms":1.0}
+{"ts_ms":1182,"event":"TIER1_PASS","primitive":"ffi_compute","latency_ms":0.05,"budget_ms":1.0}
+{"ts_ms":1185,"event":"CAPABILITY_VERIFIED","tier":2,"primitive":"headless_pipe","status":"ok","expected":"AGENTD TIER2 PIPE\n","actual":"AGENTD TIER2 PIPE\n","latency_ms":2.334,"budget_ms":50.0}
+{"ts_ms":1185,"event":"TIER2_PASS","primitive":"headless_pipe","latency_ms":2.334,"budget_ms":50.0}
+{"ts_ms":1421,"event":"CAPABILITY_VERIFIED","tier":3,"primitive":"atspi_ui","status":"ok","expected":"agentd-tier3","actual":"agentd-tier3","latency_ms":1.608,"budget_ms":20.0}
+{"ts_ms":1422,"event":"TIER3_PASS","primitive":"atspi_ui","latency_ms":1.608,"budget_ms":20.0}
+{"ts_ms":1659,"event":"INTERACTION_CYCLE_VERIFIED","primitive":"screencopy","status":"ok","frames":15,"fps":63.6,"budget_fps":10.0}
 # agent-init: /usr/bin/agentd exited 0

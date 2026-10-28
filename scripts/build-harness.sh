@@ -17,6 +17,7 @@ R=$W/root
 EPOCH=${SOURCE_DATE_EPOCH:-1700000000}
 ALPINE=${ALPINE_MIRROR:-https://dl-cdn.alpinelinux.org/alpine}/v3.24
 APK_TOOLS=apk-tools-static-3.0.8-r0.apk
+APK_TOOLS_SHA256=c8e2c88c13ba12a12269b79a3543e1190ff8c0ab0beb32b58cadfd5881c619e3  # apk.static runs on the host
 PKGS="alpine-baselayout busybox busybox-static kmod linux-virt eudev dbus at-spi2-core cage mousepad
 	libgcc python3 py3-dbus py3-gobject3 py3-evdev grim font-dejavu adwaita-icon-theme librsvg shared-mime-info"
 
@@ -24,13 +25,21 @@ rm -rf "$W" && mkdir -p "$R" "$W/initramfs"
 cd "$W"
 
 curl -sSf --connect-timeout 15 --max-time 120 -o apk-tools.apk "$ALPINE/main/x86_64/$APK_TOOLS"
+echo "$APK_TOOLS_SHA256  apk-tools.apk" | sha256sum -c --quiet
 tar -xzf apk-tools.apk sbin/apk.static 2>/dev/null
-apk() { ./sbin/apk.static --usermode --root "$R" --no-scripts --no-cache --timeout 30 \
+# apk's --timeout misses a download that stalls mid-transfer (seen on linux-virt), so each run is also wall-clock capped.
+apk() { timeout -s KILL 600 ./sbin/apk.static --usermode --root "$R" --no-scripts --no-cache --timeout 30 \
 	-X "$ALPINE/main" -X "$ALPINE/community" "$@"; }
 
 # shortcut: alpine-keys is trusted on HTTPS alone (apk.static ships no keys); pin its sha256 if the harness ever leaves dev.
 apk --initdb --allow-untrusted add alpine-keys
-apk --keys-dir "$R/etc/apk/keys" add $PKGS
+# apk add is idempotent: a retry resumes after a killed attempt, minus the half-written .apk.* temp files it left.
+for try in 1 2 3; do
+	apk --keys-dir "$R/etc/apk/keys" add $PKGS && break
+	[ "$try" -lt 3 ] || { echo "build-harness: apk add failed 3 times" >&2; exit 1; }
+	echo "build-harness: apk add attempt $try failed; retrying" >&2
+	find "$R" -name '.apk.*' -delete
+done
 
 # --no-scripts skipped busybox's own symlink step; recreate it.
 for p in $("$R/bin/busybox.static" --list-full); do
@@ -66,8 +75,8 @@ mkdir -p "$I/bin" "$I/dev" "$I/proc" "$I/newroot" "$I/lib"
 cp "$R/bin/busybox.static" "$I/bin/busybox"
 # Resolve deps from modules.dep, deps first; stored uncompressed so busybox insmod can load them.
 case ${BASE_FS:-} in
-squashfs) MODS="virtio_blk squashfs overlay" DEV=/dev/vda SQUASH=/dev/vda ;;
-iso) MODS="sr_mod isofs loop squashfs overlay" DEV=/dev/sr0 SQUASH=/cd/rootfs.squashfs ;;
+squashfs) MODS="virtio_blk squashfs overlay ext4" DEV=/dev/vda SQUASH=/dev/vda ;;
+iso) MODS="sr_mod isofs loop squashfs overlay virtio_blk ext4" DEV=/dev/sr0 SQUASH=/cd/rootfs.squashfs ;;
 *) MODS="virtio_blk ext4" DEV=/dev/vda ;;
 esac
 awk -F': *' -v want="$MODS" '
@@ -95,12 +104,14 @@ if [ -n "${BASE_FS:-}" ]; then
 /bin/busybox mkdir -p /cd
 /bin/busybox mount -t iso9660 -o ro /dev/sr0 /cd || { echo "initramfs: mount cdrom failed"; /bin/busybox poweroff -f; }
 MOUNT
-	# Read-only SquashFS lower + tmpfs upper/work -> OverlayFS root; both layers stay visible under /mnt.
+	# Read-only SquashFS lower + upper/work -> OverlayFS root; both layers stay visible under /mnt. The upper (so /data and
+	# installed capabilities) is persistent on an ext4 disk labelled agentos-data when one is attached, else tmpfs.
 	cat >>"$W/mount-root" <<'MOUNT'
 /bin/busybox mkdir -p /lower /rw
 /bin/busybox mount -t squashfs -o ro SQUASH /lower || { echo "initramfs: mount squashfs failed"; /bin/busybox poweroff -f; }
-/bin/busybox mount -t tmpfs -o mode=0755 rw /rw
-/bin/busybox mkdir /rw/upper /rw/work
+P=$(/bin/busybox findfs LABEL=agentos-data 2>/dev/null) && /bin/busybox mount -t ext4 "$P" /rw ||
+	/bin/busybox mount -t tmpfs -o mode=0755 rw /rw
+/bin/busybox mkdir -p /rw/upper /rw/work
 /bin/busybox mount -t overlay overlay -o lowerdir=/lower,upperdir=/rw/upper,workdir=/rw/work /newroot || { echo "initramfs: mount overlay failed"; /bin/busybox poweroff -f; }
 /bin/busybox mount --move /lower /newroot/mnt/base
 /bin/busybox mount --move /rw /newroot/mnt/rw

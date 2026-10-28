@@ -2,8 +2,9 @@
 # Gate 08 — evaluation rubric. Boots the Cycle 07 ISO from the CD-ROM only (no -kernel/-initrd) and scores five weighted
 # categories from serial telemetry and exit codes; every one must pass (100/100).
 #   kernel_handoff (20): PID1_READY.cmdline has rdinit=/usr/bin/agent-init (the kernel exec'd agent-init itself)
-#   bare_metal_pid1 (20): PID1_READY pid 1, comm agent-init, ts_ms <= 1000, VFS mounts, reap test, 0 zombies
-#   perception_3tier (25): TIER{1,2,3}_PASS within budget, screencopy >= 10 FPS, AGENTD_READY <= 3000 ms after PID1_READY
+#   bare_metal_pid1 (20): PID1_READY pid 1, comm agent-init, ts_ms <= 1000, VFS mounts, reap test, 0 zombies, no other process
+#   perception_3tier (25): TIER{1,2,3}_PASS within the fixed 1 / 50 / 20 ms budgets (not agentd's own budget_ms),
+#                          screencopy >= 10 FPS, AGENTD_READY <= 3000 ms after PID1_READY
 #   app_lifecycle (25): STORAGE_READY; test-cap installed to the overlay upper and verified; corrupt-cap fault injected,
 #                       CAPABILITY_ROLLBACK + clean ROLLBACK_VERIFIED; registry ends as ["test-cap"]
 #   immutable_artifact (10): run1.iso == run2.iso == booted ISO (sha256); ISOLINUX on the ISO loaded the kernel
@@ -16,7 +17,7 @@ set -eu
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 D=$ROOT/build/iso
 ISO=${ISO:-$D/cua-agentos.iso}
-RUBRIC=$ROOT/build/gate-08-rubric.jsonl
+RUBRIC=${RUBRIC:-$ROOT/build/gate-08-rubric.jsonl}
 
 for f in "$ISO" "$D/run1.iso" "$D/run2.iso"; do
 	[ -f "$f" ] || { echo "gate-08: missing $f (run scripts/build-iso-07.sh)" >&2; exit 2; }
@@ -52,9 +53,9 @@ rubric() {  # <item> <weight> <jq predicate over the event array>
 rubric kernel_handoff 20 'any(.[]; .event=="PID1_READY" and ((.cmdline // "") | split(" ") | index("rdinit=/usr/bin/agent-init")) != null)'
 rubric bare_metal_pid1 20 'any(.[]; .event=="PID1_READY" and .pid==1 and .comm=="agent-init" and .ts_ms <= 1000
 	and .mounts == {"/proc":"proc","/sys":"sysfs","/dev":"devtmpfs","/dev/pts":"devpts","/run":"tmpfs","/tmp":"tmpfs"}
-	and .reap_test.reaped==true and .zombies==0)'
+	and .reap_test.reaped==true and .zombies==0 and .user_procs==1)'
 rubric perception_3tier 25 '. as $all | (first(.[] | select(.event=="PID1_READY")).ts_ms) as $p
-	| all(1, 2, 3; . as $t | any($all[]; .event == "TIER\($t)_PASS" and .latency_ms <= .budget_ms))
+	| all([1, 1], [2, 50], [3, 20]; . as [$t, $b] | any($all[]; .event == "TIER\($t)_PASS" and (.latency_ms|numbers) <= $b))
 	and any(.[]; .event=="INTERACTION_CYCLE_VERIFIED" and .primitive=="screencopy" and .fps >= 10)
 	and any(.[]; .event=="AGENTD_READY" and .ts_ms - $p <= 3000)'
 rubric app_lifecycle 25 'any(.[]; .event=="STORAGE_READY" and .base_ro==true and .overlay==true)

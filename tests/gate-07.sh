@@ -3,7 +3,7 @@
 # ISOLINUX on the ISO loads the kernel and initramfs, which loop-mounts /rootfs.squashfs from the CD as the base).
 # Required serial events (JSON lines on ttyS0, each with "ts_ms"):
 #   PID1_READY ts_ms <= 1000; STORAGE_READY {base_ro:true, overlay:true}; AGENTD_READY within 3000 ms of PID1_READY;
-#   TASK_COMPLETE {status:"success"} (the agent reaches and finishes its unattended task)
+#   TASK_COMPLETE {status:"success"}, and no TASK_COMPLETE of any other status (every unattended task finishes)
 # QEMU must exit 0 on its own (agent-init's RB_POWER_OFF path; a panic hangs: panic=0).
 # Reproducibility: scripts/build-iso-07.sh builds the ISO twice from scratch into build/iso/run{1,2}.iso; their
 # sha256 must match, and the booted build/iso/cua-agentos.iso must be that same image.
@@ -44,5 +44,6 @@ check pid1_ready    'any(.[]; .event=="PID1_READY" and .pid==1 and .ts_ms <= 100
 check storage_ready 'any(.[]; .event=="STORAGE_READY" and .base_ro==true and .overlay==true)'
 check agentd_ready  '(first(.[] | select(.event=="PID1_READY")).ts_ms) as $p
 	| any(.[]; .event=="AGENTD_READY" and .ts_ms - $p <= 3000)'
-check task_complete 'any(.[]; .event=="TASK_COMPLETE" and .status=="success")'
+check task_complete 'any(.[]; .event=="TASK_COMPLETE" and .status=="success")
+	and all(.[]; .event!="TASK_COMPLETE" or .status=="success")'
 exit $fail

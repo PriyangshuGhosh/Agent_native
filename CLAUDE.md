@@ -96,5 +96,10 @@ All proposed defaults were accepted, with these pins:
 | 08 | **PASSED** (tag `cycle-08`) | Build: `scripts/build-iso-07.sh`, then `scripts/release-08.sh`, which copies the ISO to `release/`, writes `release/SHA256SUMS` (vmlinuz, initramfs, rootfs.squashfs, ISO), runs gate 08 against `release/cua-agentos.iso` and writes `docs/grading-report.md` (also in `release/`) from that run's serial log. The ISO boot line now has `rdinit=/usr/bin/agent-init`: the kernel execs agent-init from the initramfs, it execs `/stage1` (busybox mount script; `/init` is kept because busybox `switch_root` requires it), and that switch_roots back to agent-init on the overlay root, still PID 1. `PID1_READY` carries `cmdline`. agentd adds a Tier 3 screencopy probe (15 grim frames of `HEADLESS-1` → `INTERACTION_CYCLE_VERIFIED` `fps`, about 60). Gate: `tests/gate-08.sh` prints one `RUBRIC_PASS`/`RUBRIC_FAIL` line per category (kernel_handoff 20, bare_metal_pid1 20, perception_3tier 25, app_lifecycle 25, immutable_artifact 10) to stdout and `build/gate-08-rubric.jsonl`, and needs 100/100. `PID1_READY` ~390 ms, `AGENTD_READY` ~1.6 s later, about 3 s total. Gates 02–07 still pass. Repairs used: 1/3 (busybox `switch_root` needs `/init`). The ISO (~189 MB) is gitignored and not committed; its sha256 is in `release/SHA256SUMS`. |
 
 **Final build status (2026-10-28):** all 8 cycles PASSED. Release: `release/cua-agentos.iso`
-(sha256 `cd489b55a3737612809f3703b62551e8b6da24da34ae535ad6c70cbaae1dd196`, reproducible from `scripts/build-iso-07.sh`),
+(sha256 `b26f2fdd3ea1ea6dfebc058635f9c17c9369caf99a78b2b994d8c5aa4ad9431f`, reproducible from `scripts/build-iso-07.sh`),
 rubric 100/100 (`docs/grading-report.md`).
+
+**Hardening pass (2026-10-29):** see `docs/hardening-2026-10-29.md`. Now done: the 30 s step SIGKILL (process-group kill),
+the SIGUSR1 emergency stop, strict directive validation and allow-lists, a crash-safe install journal, and persistent `/data`
+(ext4 disk labelled `agentos-data`, optional; it is exercised by `tests/test-persist.sh`). Fast suite: `tests/regress.sh`.
+All gates were rerun from a clean rebuild.

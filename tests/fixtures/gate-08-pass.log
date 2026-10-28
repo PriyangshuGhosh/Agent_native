@@ -1,0 +1,35 @@
+c[?7l[2J[0mSeaBIOS (version 1.16.3-debian-1.16.3-2)
+Booting from DVD/CD...
+
+ISOLINUX 6.04 6.04-pre1 ETCD Copyright (C) 1994-2015 H. Peter Anvin et al
+c[?7l[2J
+{"ts_ms":382,"event":"PID1_READY","pid":1,"comm":"agent-init","mounts":{"/proc":"proc","/sys":"sysfs","/dev":"devtmpfs","/dev/pts":"devpts","/run":"tmpfs","/tmp":"tmpfs"},"reap_test":{"pid":503,"reaped":true},"zombies":0,"user_procs":1,"cmdline":"BOOT_IMAGE=/boot/vmlinuz rdinit=/usr/bin/agent-init console=ttyS0 quiet loglevel=0 panic=0 initrd=/boot/initramfs"}
+{"ts_ms":382,"event":"STORAGE_READY","base_ro":true,"overlay":true,"persistent":false,"root":"overlay","base":"squashfs","upper":"tmpfs"}
+{"ts_ms":1202,"event":"AGENTD_READY","pid":871,"bus":"/run/user/0/bus","wayland":"/run/user/0/wayland-0"}
+{"ts_ms":1203,"event":"CAPABILITY_VERIFIED","tier":1,"primitive":"ffi_compute","status":"ok","expected":12586269025,"actual":12586269025,"latency_ms":0.033,"budget_ms":1.0}
+{"ts_ms":1204,"event":"TIER1_PASS","primitive":"ffi_compute","latency_ms":0.033,"budget_ms":1.0}
+{"ts_ms":1206,"event":"CAPABILITY_VERIFIED","tier":2,"primitive":"headless_pipe","status":"ok","expected":"AGENTD TIER2 PIPE\n","actual":"AGENTD TIER2 PIPE\n","latency_ms":1.196,"budget_ms":50.0}
+{"ts_ms":1207,"event":"TIER2_PASS","primitive":"headless_pipe","latency_ms":1.196,"budget_ms":50.0}
+{"ts_ms":1522,"event":"CAPABILITY_VERIFIED","tier":3,"primitive":"atspi_ui","status":"ok","expected":"agentd-tier3","actual":"agentd-tier3","latency_ms":1.672,"budget_ms":20.0}
+{"ts_ms":1524,"event":"TIER3_PASS","primitive":"atspi_ui","latency_ms":1.672,"budget_ms":20.0}
+{"ts_ms":1779,"event":"INTERACTION_CYCLE_VERIFIED","primitive":"screencopy","status":"ok","frames":15,"fps":59.0,"budget_fps":10.0}
+{"ts_ms":1781,"event":"TASK_START","task_id":"t05-note-upper-checksum","intent":"Type a note into the editor, upper-case it headlessly, then checksum it in-process","model":"gemini-2.5-flash","steps":3,"source":"recorded"}
+{"ts_ms":1839,"event":"REPLAN_TRIGGERED","task_id":"t05-note-upper-checksum","step":1,"tier":3,"reason":"precondition: mousepad widget role is \"text\", expected \"entry\"","attempt":1,"budget":3}
+{"ts_ms":1843,"event":"STEP_VERIFIED","task_id":"t05-note-upper-checksum","step":1,"tier":3,"action":"set_text","status":"ok","output":"hello agentos","latency_ms":2.184}
+{"ts_ms":1845,"event":"STEP_VERIFIED","task_id":"t05-note-upper-checksum","step":2,"tier":2,"action":"pipe","status":"ok","output":"HELLO AGENTOS","latency_ms":1.222}
+{"ts_ms":1846,"event":"STEP_VERIFIED","task_id":"t05-note-upper-checksum","step":3,"tier":1,"action":"ffi_call","status":"ok","output":1364236356,"latency_ms":0.007}
+{"ts_ms":1847,"event":"TASK_COMPLETE","task_id":"t05-note-upper-checksum","status":"success","steps":3,"repairs":1}
+{"ts_ms":1848,"event":"WORKFLOW_COMPLETE","task_id":"t05-note-upper-checksum","steps":3,"repairs":1}
+{"ts_ms":1849,"event":"TASK_START","task_id":"t06-lifecycle","intent":"Install, run and verify each queued capability; roll back any that fails","packages":["test-cap","corrupt-cap"],"installed":[],"source":"local"}
+{"ts_ms":1851,"event":"LIFECYCLE_INSTALL","task_id":"t06-lifecycle","package":"test-cap","version":"1.0.0","files":["/usr/local/bin/test-cap"],"journal":2}
+{"ts_ms":1852,"event":"CAPABILITY_INSTALLED","package":"test-cap","version":"1.0.0"}
+{"ts_ms":1854,"event":"LIFECYCLE_VERIFIED","package":"test-cap","status":"ok","stdout":"test-cap ok\n","in_upper":true,"in_base":false,"latency_ms":2.938}
+{"ts_ms":1856,"event":"LIFECYCLE_FAIL_INJECTED","package":"corrupt-cap","fault":"payload truncated: bin/corrupt-cap is not executable"}
+{"ts_ms":1857,"event":"LIFECYCLE_INSTALL","task_id":"t06-lifecycle","package":"corrupt-cap","version":"1.0.0","files":["/usr/local/bin/corrupt-cap"],"journal":2}
+{"ts_ms":1858,"event":"CAPABILITY_INSTALLED","package":"corrupt-cap","version":"1.0.0"}
+{"ts_ms":1859,"event":"LIFECYCLE_VERIFIED","package":"corrupt-cap","status":"fail","error":"execute: Exec format error (os error 8)"}
+{"ts_ms":1859,"event":"ROLLBACK_TRIGGERED","package":"corrupt-cap","reason":"execute: Exec format error (os error 8)","journal":2}
+{"ts_ms":1859,"event":"CAPABILITY_ROLLBACK","package":"corrupt-cap","reason":"execute: Exec format error (os error 8)"}
+{"ts_ms":1859,"event":"ROLLBACK_VERIFIED","package":"corrupt-cap","clean":true,"restored":true,"upper_clean":true,"base_clean":true,"journal":2}
+{"ts_ms":1859,"event":"TASK_COMPLETE","task_id":"t06-lifecycle","status":"success","registry":["test-cap"]}
+# agent-init: /usr/bin/agentd exited 0

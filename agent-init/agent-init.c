@@ -42,6 +42,9 @@ static struct svc {
 static char *session_env[] = {
 	"PATH=/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin", "HOME=/root", "LANG=C.UTF-8",
 	"XDG_RUNTIME_DIR=" RUNTIME, "WAYLAND_DISPLAY=wayland-0", "DBUS_SESSION_BUS_ADDRESS=unix:path=" RUNTIME "/bus",
+	/* App state is per-boot scratch (tmpfs): with a persistent upper, mousepad would otherwise restore last boot's session */
+	"XDG_CONFIG_HOME=" RUNTIME "/config", "XDG_DATA_HOME=" RUNTIME "/data", "XDG_CACHE_HOME=" RUNTIME "/cache",
+	"XDG_STATE_HOME=" RUNTIME "/state",
 	/* cage: headless output plus libinput so uinput devices reach it; no seat manager, no GPU */
 	"WLR_BACKENDS=headless,libinput", "LIBSEAT_BACKEND=noop", "WLR_RENDERER=pixman", "WLR_LIBINPUT_NO_DEVICES=1",
 	"GDK_BACKEND=wayland",
@@ -104,14 +107,19 @@ static int reap(void)
 	return done;
 }
 
-/* Polls up to 10 s for a ONESHOT to finish or a ready path to appear; on timeout boot goes on and the probe reports. */
+/* Polls up to 10 s for a ONESHOT to finish or a ready path to appear; on timeout boot goes on and the probe reports.
+ * SIGTERM/SIGINT stay blocked here, so a pending one is picked up by hand: shutdown must not wait out the boot. */
 static void wait_ready(const struct svc *s)
 {
 	struct timespec tick = { 0, 10000000 };
+	sigset_t pend;
 	int i;
 
 	for (i = 0; i < 1000 && !stop; i++) {
 		reap();
+		sigpending(&pend);
+		if (sigismember(&pend, SIGTERM) || sigismember(&pend, SIGINT))
+			stop = 1;
 		if (s->kind == ONESHOT ? s->pid == 0 : !s->ready || access(s->ready, F_OK) == 0)
 			return;
 		nanosleep(&tick, NULL);
@@ -131,11 +139,15 @@ static void start_services(void)
 	logfd = open("/tmp/harness.log", O_WRONLY | O_CREAT | O_APPEND | O_CLOEXEC, 0644);
 	for (i = 0; i < NSVC && !stop; i++) {
 		spawn(&svcs[i]);
+		if (svcs[i].kind == FINAL && !svcs[i].pid) {
+			dprintf(tty, "# agent-init: cannot fork %s\n", svcs[i].argv[0]);
+			stop = 1; /* nothing would ever exit and power us off */
+		}
 		wait_ready(&svcs[i]);
 	}
 }
 
-/* SIGTERM everyone, give them 2 s, SIGKILL the rest, reap all, then power off. */
+/* SIGTERM everyone, give them 2 s, SIGKILL the rest, reap all, remount read-only, then power off. */
 static void shutdown_all(void)
 {
 	struct timespec tick = { 0, 10000000 };
@@ -147,6 +159,10 @@ static void shutdown_all(void)
 	kill(-1, SIGKILL);
 	while (waitpid(-1, NULL, 0) > 0)
 		;
+	sync();
+	/* A persistent ext4 upper must be left clean (no journal to replay); failures change nothing, data is synced. */
+	mount(NULL, "/", NULL, MS_REMOUNT | MS_RDONLY, NULL);
+	mount(NULL, "/mnt/rw", NULL, MS_REMOUNT | MS_RDONLY, NULL);
 	sync();
 	reboot(RB_POWER_OFF);
 }
@@ -212,8 +228,9 @@ static int mounts_json(char *buf, size_t len)
 	return n;
 }
 
-/* The initramfs leaves the SquashFS base at /mnt/base and the tmpfs upper/work at /mnt/rw, under an overlay root.
- * base_ro needs the kernel to list the base ro AND a write into it to fail with EROFS. */
+/* The initramfs leaves the SquashFS base at /mnt/base and the upper/work at /mnt/rw (tmpfs, or ext4 when the persistent
+ * agentos-data disk is attached), under an overlay root. base_ro needs the kernel to list the base ro AND a write into it
+ * to fail with EROFS. */
 static int storage_json(char *buf, size_t len)
 {
 	char src[256], dir[256], type[32], opts[256], root[32] = "", base[32] = "", upper[32] = "";
@@ -238,10 +255,11 @@ static int storage_json(char *buf, size_t len)
 	if (fd >= 0)
 		close(fd);
 	return snprintf(buf, len,
-			"{\"ts_ms\":%ld,\"event\":\"STORAGE_READY\",\"base_ro\":%s,\"overlay\":%s,"
+			"{\"ts_ms\":%ld,\"event\":\"STORAGE_READY\",\"base_ro\":%s,\"overlay\":%s,\"persistent\":%s,"
 			"\"root\":\"%s\",\"base\":\"%s\",\"upper\":\"%s\"}\n",
-			now_ms(), base_ro ? "true" : "false", !strcmp(root, "overlay") && !strcmp(upper, "tmpfs") ? "true" : "false",
-			root, base, upper);
+			now_ms(), base_ro ? "true" : "false",
+			!strcmp(root, "overlay") && (!strcmp(upper, "tmpfs") || !strcmp(upper, "ext4")) ? "true" : "false",
+			!strcmp(upper, "ext4") ? "true" : "false", root, base, upper);
 }
 
 /* Counts zombies and userspace processes (kernel threads have an empty cmdline). */

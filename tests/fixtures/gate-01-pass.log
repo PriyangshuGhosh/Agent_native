@@ -1,7 +1,5 @@
-[    0.000000] Linux version noise that the gate must ignore
-{"ts_ms":812,"event":"COMPOSITOR_READY","output":"HEADLESS-1"}
-{"ts_ms":1430,"event":"INTERACTION_CYCLE_VERIFIED","primitive":"atspi_tree","app":"mousepad","nodes":57}
-{"ts_ms":1502,"event":"INTERACTION_CYCLE_VERIFIED","primitive":"atspi_action","expected":"gate01-atspi","actual":"gate01-atspi"}
-{"ts_ms":2210,"event":"INTERACTION_CYCLE_VERIFIED","primitive":"uinput","expected":"gate01-uinput","actual":"gate01-uinput"}
-{"ts_ms":3350,"event":"INTERACTION_CYCLE_VERIFIED","primitive":"screencopy","frames":30,"fps":14.8}
-{"ts_ms":3351,"event":"COMPOSITOR_READY","output":"HEADLESS-1"
+{"ts_ms": 1290, "event": "COMPOSITOR_READY", "output": "HEADLESS-1"}
+{"ts_ms": 1577, "event": "INTERACTION_CYCLE_VERIFIED", "primitive": "atspi_tree", "app": "mousepad", "nodes": 331}
+{"ts_ms": 1584, "event": "INTERACTION_CYCLE_VERIFIED", "primitive": "atspi_action", "expected": "gate01-atspi", "actual": "gate01-atspi"}
+{"ts_ms": 1879, "event": "INTERACTION_CYCLE_VERIFIED", "primitive": "uinput", "expected": "gate01-uinput", "actual": "gate01-uinput"}
+{"ts_ms": 2120, "event": "INTERACTION_CYCLE_VERIFIED", "primitive": "screencopy", "frames": 15, "fps": 63.2}

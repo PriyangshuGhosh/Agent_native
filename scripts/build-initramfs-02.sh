@@ -17,11 +17,12 @@ strip "$W/initramfs/usr/bin/agent-init"
 if [ ! -f "$OUT/vmlinuz" ]; then
 	cd "$W"
 	curl -sSf --connect-timeout 15 --max-time 120 -o apk-tools.apk "$ALPINE/main/x86_64/$APK_TOOLS"
+	echo "c8e2c88c13ba12a12269b79a3543e1190ff8c0ab0beb32b58cadfd5881c619e3  apk-tools.apk" | sha256sum -c --quiet
 	tar -xzf apk-tools.apk sbin/apk.static 2>/dev/null
 	apk() { ./sbin/apk.static --usermode --root "$W/keys-root" --no-scripts --no-cache --timeout 30 -X "$ALPINE/main" "$@"; }
 	# shortcut: alpine-keys is trusted on HTTPS alone (apk.static ships no keys); pin its sha256 if this leaves dev.
 	apk --initdb --allow-untrusted add alpine-keys
-	./sbin/apk.static --root "$W/keys-root" --keys-dir "$W/keys-root/etc/apk/keys" --no-cache --timeout 30 \
+	timeout -s KILL 600 ./sbin/apk.static --root "$W/keys-root" --keys-dir "$W/keys-root/etc/apk/keys" --no-cache --timeout 30 \
 		-X "$ALPINE/main" fetch -o "$W" linux-virt
 	tar -xzf "$W"/linux-virt-*.apk -C "$W" boot/vmlinuz-virt 2>/dev/null
 	cp "$W/boot/vmlinuz-virt" "$OUT/vmlinuz"

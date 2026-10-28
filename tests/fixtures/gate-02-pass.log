@@ -1,2 +1,4 @@
-[    0.000000] kernel noise the gate must ignore
-{"ts_ms":412,"event":"PID1_READY","pid":1,"comm":"agent-init","mounts":{"/proc":"proc","/sys":"sysfs","/dev":"devtmpfs","/dev/pts":"devpts","/run":"tmpfs","/tmp":"tmpfs"},"reap_test":{"pid":2,"reaped":true},"zombies":0,"user_procs":1}
+c[?7l[2J[0mSeaBIOS (version 1.16.3-debian-1.16.3-2)
+Booting from ROM..c[?7l[2J
+{"ts_ms":228,"event":"PID1_READY","pid":1,"comm":"agent-init","mounts":{"/proc":"proc","/sys":"sysfs","/dev":"devtmpfs","/dev/pts":"devpts","/run":"tmpfs","/tmp":"tmpfs"},"reap_test":{"pid":428,"reaped":true},"zombies":0,"user_procs":1,"cmdline":"console=ttyS0 quiet loglevel=0 panic=0 rdinit=/usr/bin/agent-init agent.test_poweroff"}
+{"ts_ms":232,"event":"STORAGE_READY","base_ro":false,"overlay":false,"persistent":false,"root":"rootfs","base":"","upper":""}

@@ -29,36 +29,36 @@ BOOT_IMAGE=/boot/vmlinuz rdinit=/usr/bin/agent-init console=ttyS0 quiet loglevel
 ### Bare-metal PID 1 (20%)
 
 ```json
-{"ts_ms":405,"event":"PID1_READY","pid":1,"comm":"agent-init","mounts":{"/proc":"proc","/sys":"sysfs","/dev":"devtmpfs","/dev/pts":"devpts","/run":"tmpfs","/tmp":"tmpfs"},"reap_test":{"pid":492,"reaped":true},"zombies":0,"user_procs":1,"cmdline":"BOOT_IMAGE=/boot/vmlinuz rdinit=/usr/bin/agent-init console=ttyS0 quiet loglevel=0 panic=0 initrd=/boot/initramfs"}
+{"ts_ms":403,"event":"PID1_READY","pid":1,"comm":"agent-init","mounts":{"/proc":"proc","/sys":"sysfs","/dev":"devtmpfs","/dev/pts":"devpts","/run":"tmpfs","/tmp":"tmpfs"},"reap_test":{"pid":505,"reaped":true},"zombies":0,"user_procs":1,"cmdline":"BOOT_IMAGE=/boot/vmlinuz rdinit=/usr/bin/agent-init console=ttyS0 quiet loglevel=0 panic=0 initrd=/boot/initramfs"}
 ```
 
 ### Perception and 3-tier interaction (25%)
 
 ```json
-{"ts_ms":1992,"event":"CAPABILITY_VERIFIED","tier":1,"primitive":"ffi_compute","status":"ok","expected":12586269025,"actual":12586269025,"latency_ms":0.066,"budget_ms":1.0}
-{"ts_ms":1992,"event":"TIER1_PASS","primitive":"ffi_compute","latency_ms":0.066,"budget_ms":1.0}
-{"ts_ms":1993,"event":"CAPABILITY_VERIFIED","tier":2,"primitive":"headless_pipe","status":"ok","expected":"AGENTD TIER2 PIPE\n","actual":"AGENTD TIER2 PIPE\n","latency_ms":0.504,"budget_ms":50.0}
-{"ts_ms":1993,"event":"TIER2_PASS","primitive":"headless_pipe","latency_ms":0.504,"budget_ms":50.0}
-{"ts_ms":2556,"event":"CAPABILITY_VERIFIED","tier":3,"primitive":"atspi_ui","status":"ok","expected":"agentd-tier3","actual":"agentd-tier3","latency_ms":6.245,"budget_ms":20.0}
-{"ts_ms":2556,"event":"TIER3_PASS","primitive":"atspi_ui","latency_ms":6.245,"budget_ms":20.0}
-{"ts_ms":2806,"event":"INTERACTION_CYCLE_VERIFIED","primitive":"screencopy","status":"ok","frames":15,"fps":60.0,"budget_fps":10.0}
+{"ts_ms":1246,"event":"CAPABILITY_VERIFIED","tier":1,"primitive":"ffi_compute","status":"ok","expected":12586269025,"actual":12586269025,"latency_ms":0.03,"budget_ms":1.0}
+{"ts_ms":1246,"event":"TIER1_PASS","primitive":"ffi_compute","latency_ms":0.03,"budget_ms":1.0}
+{"ts_ms":1247,"event":"CAPABILITY_VERIFIED","tier":2,"primitive":"headless_pipe","status":"ok","expected":"AGENTD TIER2 PIPE\n","actual":"AGENTD TIER2 PIPE\n","latency_ms":1.345,"budget_ms":50.0}
+{"ts_ms":1247,"event":"TIER2_PASS","primitive":"headless_pipe","latency_ms":1.345,"budget_ms":50.0}
+{"ts_ms":1567,"event":"CAPABILITY_VERIFIED","tier":3,"primitive":"atspi_ui","status":"ok","expected":"agentd-tier3","actual":"agentd-tier3","latency_ms":2.015,"budget_ms":20.0}
+{"ts_ms":1568,"event":"TIER3_PASS","primitive":"atspi_ui","latency_ms":2.015,"budget_ms":20.0}
+{"ts_ms":1806,"event":"INTERACTION_CYCLE_VERIFIED","primitive":"screencopy","status":"ok","frames":15,"fps":63.3,"budget_fps":10.0}
 ```
 
 ### Application lifecycle (25%)
 
 ```json
-{"ts_ms":406,"event":"STORAGE_READY","base_ro":true,"overlay":true,"root":"overlay","base":"squashfs","upper":"tmpfs"}
-{"ts_ms":2935,"event":"LIFECYCLE_INSTALL","task_id":"t06-lifecycle","package":"test-cap","version":"1.0.0","files":["/usr/local/bin/test-cap"],"journal":2}
-{"ts_ms":2937,"event":"CAPABILITY_INSTALLED","package":"test-cap","version":"1.0.0"}
-{"ts_ms":2943,"event":"LIFECYCLE_VERIFIED","package":"test-cap","status":"ok","stdout":"test-cap ok\n","in_upper":true,"in_base":false,"latency_ms":7.835}
-{"ts_ms":2950,"event":"LIFECYCLE_FAIL_INJECTED","package":"corrupt-cap","fault":"payload truncated: bin/corrupt-cap is not executable"}
-{"ts_ms":2951,"event":"LIFECYCLE_INSTALL","task_id":"t06-lifecycle","package":"corrupt-cap","version":"1.0.0","files":["/usr/local/bin/corrupt-cap"],"journal":2}
-{"ts_ms":2951,"event":"CAPABILITY_INSTALLED","package":"corrupt-cap","version":"1.0.0"}
-{"ts_ms":2955,"event":"LIFECYCLE_VERIFIED","package":"corrupt-cap","status":"fail","error":"execute: Exec format error (os error 8)"}
-{"ts_ms":2956,"event":"ROLLBACK_TRIGGERED","package":"corrupt-cap","reason":"execute: Exec format error (os error 8)","journal":2}
-{"ts_ms":2956,"event":"CAPABILITY_ROLLBACK","package":"corrupt-cap","reason":"execute: Exec format error (os error 8)"}
-{"ts_ms":2956,"event":"ROLLBACK_VERIFIED","package":"corrupt-cap","clean":true,"restored":true,"upper_clean":true,"base_clean":true,"journal":2}
-{"ts_ms":2956,"event":"TASK_COMPLETE","task_id":"t06-lifecycle","status":"success","registry":["test-cap"]}
+{"ts_ms":403,"event":"STORAGE_READY","base_ro":true,"overlay":true,"persistent":false,"root":"overlay","base":"squashfs","upper":"tmpfs"}
+{"ts_ms":1871,"event":"LIFECYCLE_INSTALL","task_id":"t06-lifecycle","package":"test-cap","version":"1.0.0","files":["/usr/local/bin/test-cap"],"journal":2}
+{"ts_ms":1872,"event":"CAPABILITY_INSTALLED","package":"test-cap","version":"1.0.0"}
+{"ts_ms":1874,"event":"LIFECYCLE_VERIFIED","package":"test-cap","status":"ok","stdout":"test-cap ok\n","in_upper":true,"in_base":false,"latency_ms":3.048}
+{"ts_ms":1876,"event":"LIFECYCLE_FAIL_INJECTED","package":"corrupt-cap","fault":"payload truncated: bin/corrupt-cap is not executable"}
+{"ts_ms":1877,"event":"LIFECYCLE_INSTALL","task_id":"t06-lifecycle","package":"corrupt-cap","version":"1.0.0","files":["/usr/local/bin/corrupt-cap"],"journal":2}
+{"ts_ms":1877,"event":"CAPABILITY_INSTALLED","package":"corrupt-cap","version":"1.0.0"}
+{"ts_ms":1878,"event":"LIFECYCLE_VERIFIED","package":"corrupt-cap","status":"fail","error":"execute: Exec format error (os error 8)"}
+{"ts_ms":1878,"event":"ROLLBACK_TRIGGERED","package":"corrupt-cap","reason":"execute: Exec format error (os error 8)","journal":2}
+{"ts_ms":1879,"event":"CAPABILITY_ROLLBACK","package":"corrupt-cap","reason":"execute: Exec format error (os error 8)"}
+{"ts_ms":1879,"event":"ROLLBACK_VERIFIED","package":"corrupt-cap","clean":true,"restored":true,"upper_clean":true,"base_clean":true,"journal":2}
+{"ts_ms":1879,"event":"TASK_COMPLETE","task_id":"t06-lifecycle","status":"success","registry":["test-cap"]}
 ```
 
 ### Immutable build artifact (10%)
@@ -67,9 +67,9 @@ BOOT_IMAGE=/boot/vmlinuz rdinit=/usr/bin/agent-init console=ttyS0 quiet loglevel
 `run1.iso` == `run2.iso` == the booted ISO by sha256 and boots with `-cdrom` only (no `-kernel`/`-initrd`):
 
 ```
-cd489b55a3737612809f3703b62551e8b6da24da34ae535ad6c70cbaae1dd196  run1.iso
-cd489b55a3737612809f3703b62551e8b6da24da34ae535ad6c70cbaae1dd196  run2.iso
-cd489b55a3737612809f3703b62551e8b6da24da34ae535ad6c70cbaae1dd196  release/cua-agentos.iso
+b26f2fdd3ea1ea6dfebc058635f9c17c9369caf99a78b2b994d8c5aa4ad9431f  run1.iso
+b26f2fdd3ea1ea6dfebc058635f9c17c9369caf99a78b2b994d8c5aa4ad9431f  run2.iso
+b26f2fdd3ea1ea6dfebc058635f9c17c9369caf99a78b2b994d8c5aa4ad9431f  release/cua-agentos.iso
 ```
 
 The `BOOT_IMAGE=/boot/vmlinuz` and `initrd=/boot/initramfs` cmdline entries above were set by ISOLINUX on the ISO. QEMU exited 0 through agent-init's `RB_POWER_OFF` path.
@@ -78,20 +78,20 @@ The `BOOT_IMAGE=/boot/vmlinuz` and `initrd=/boot/initramfs` cmdline entries abov
 
 | Measurement | Value | Budget |
 |---|---|---|
-| Kernel start → PID1_READY | 405 ms | ≤1000 ms |
-| PID1_READY → AGENTD_READY | 1585 ms | ≤3000 ms |
-| TIER1 ffi_compute | 0.066 ms | ≤1.0 ms |
-| TIER2 headless_pipe | 0.504 ms | ≤50.0 ms |
-| TIER3 atspi_ui | 6.245 ms | ≤20.0 ms |
-| Tier 3 screencopy (grim, 15 frames) | 60.0 FPS | ≥10 FPS |
-| Capability install verify (test-cap) | 7.835 ms | 30 s cap |
-| Kernel start → last event | 2956 ms | gate 300 s |
+| Kernel start → PID1_READY | 403 ms | ≤1000 ms |
+| PID1_READY → AGENTD_READY | 842 ms | ≤3000 ms |
+| TIER1 ffi_compute | 0.03 ms | ≤1.0 ms |
+| TIER2 headless_pipe | 1.345 ms | ≤50.0 ms |
+| TIER3 atspi_ui | 2.015 ms | ≤20.0 ms |
+| Tier 3 screencopy (grim, 15 frames) | 63.3 FPS | ≥10 FPS |
+| Capability install verify (test-cap) | 3.048 ms | 30 s cap |
+| Kernel start → last event | 1879 ms | gate 300 s |
 
 ## SHA-256 checksums (`release/SHA256SUMS`)
 
 ```
 55fcc67c770730412a505df82b80dce098083e5680a7449dc6b4eaed895de21d  vmlinuz
-83859b1bf3680b9a57e6dae4a589152279bff614d36e445fc76349050dafd266  initramfs
-f80fd0ec574005af1b083480909085ca9a40723a293cb1a768194c2abb57c08a  rootfs.squashfs
-cd489b55a3737612809f3703b62551e8b6da24da34ae535ad6c70cbaae1dd196  cua-agentos.iso
+1bcdfc7d113087bb37fcce7139f30309ffe7160756bdbaf9847dcc677f290746  initramfs
+000d4f0ebaf4e47469464e0fd6c4291548d17a0f475398c5dfecc870f72bfab9  rootfs.squashfs
+b26f2fdd3ea1ea6dfebc058635f9c17c9369caf99a78b2b994d8c5aa4ad9431f  cua-agentos.iso
 ```

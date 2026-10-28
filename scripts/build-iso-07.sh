@@ -12,9 +12,10 @@ mkdir -p "$D"
 # ISOLINUX binaries from Alpine's syslinux package (not installed on the host).
 if [ ! -f "$D/syslinux/usr/share/syslinux/isolinux.bin" ]; then
 	rm -rf "$D/syslinux" && mkdir -p "$D/syslinux"
-	curl -sSf --connect-timeout 15 --max-time 60 \
-		"${ALPINE_MIRROR:-https://dl-cdn.alpinelinux.org/alpine}/v3.24/main/x86_64/$SYSLINUX" |
-		tar -xz -C "$D/syslinux" usr/share/syslinux/isolinux.bin usr/share/syslinux/ldlinux.c32 2>/dev/null
+	curl -sSf --connect-timeout 15 --max-time 60 -o "$D/syslinux/$SYSLINUX" \
+		"${ALPINE_MIRROR:-https://dl-cdn.alpinelinux.org/alpine}/v3.24/main/x86_64/$SYSLINUX"
+	echo "8d48ed312febfca789740fab80cc07c7f380ce2cb629a0005ea92b049b81aad1  $D/syslinux/$SYSLINUX" | sha256sum -c --quiet
+	tar -xzf "$D/syslinux/$SYSLINUX" -C "$D/syslinux" usr/share/syslinux/isolinux.bin usr/share/syslinux/ldlinux.c32 2>/dev/null
 fi
 
 for run in run1 run2; do
