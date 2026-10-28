@@ -1,0 +1,88 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Architecture | CUA-AgentOS</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<nav>
+<div class="brand">CUA-AgentOS</div>
+<a href="index.html">Overview</a>
+<a class="active" href="architecture.html">Architecture</a>
+<a href="phases.html">Phases</a>
+<a href="agent.html">Agent Logic</a>
+<a href="testing.html">Testing</a>
+<a href="requirements.html">Requirements</a>
+<a href="timeline.html">Timeline</a>
+</nav>
+
+<main>
+<h1>System Architecture</h1>
+<p class="lead">Strict isolation between deterministic low-level OS infrastructure and the higher-level cognitive agent runtime.</p>
+
+<h2>Top-Level Architectural Stack</h2>
+<div class="architecture">
+<pre>
+┌────────────────────────────────────────────────────────┐
+│                   USER INTENT / RPC                    │
+├────────────────────────────────────────────────────────┤
+│                 AGENT COGNITIVE ENGINE                 │
+│      Intent Parser │ Capability Router │ Verifier      │
+├────────────────────────────────────────────────────────┤
+│                 3-TIER EXECUTION PLANE                 │
+│  [Tier 1: Wasm / FFI]  [Tier 2: Headless Sockets]      │
+│  [Tier 3: Off-Screen Wayland (AT-SPI + uinput)]        │
+├────────────────────────────────────────────────────────┤
+│               WAYLAND COMPOSITOR (cage)                │
+│             Output: Virtual Head (HEADLESS-1)          │
+├────────────────────────────────────────────────────────┤
+│                 AGENT-INIT (PID 1)                     │
+│    VFS Mounts │ Signal Handling │ Service Manager      │
+├────────────────────────────────────────────────────────┤
+│                 MINIMAL LINUX KERNEL                   │
+│         DRM/KMS │ uinput │ OverlayFS │ VirtIO          │
+├────────────────────────────────────────────────────────┤
+│                        HARDWARE                        │
+└────────────────────────────────────────────────────────┘
+</pre>
+</div>
+
+<h2>Deterministic Boot Flow</h2>
+<div class="codebox">Bootloader (GRUB / Syslinux)
+  &darr;
+Linux Kernel (init=/usr/bin/agent-init)
+  &darr;
+agent-init mounts /proc, /sys, /dev, /dev/pts, /run, /tmp
+  &darr;
+agent-init initializes KMS/DRM &amp; /dev/uinput
+  &darr;
+agent-init launches dbus-daemon --session
+  &darr;
+agent-init launches Wayland compositor (cage -d on HEADLESS-1)
+  &darr;
+agent-init spawns Agent Runtime Daemon</div>
+
+<h2>PID 1 Constraints</h2>
+<ul>
+<li>Written strictly in POSIX C.</li>
+<li>Mounts essential kernel filesystems and handles device nodes.</li>
+<li>Implements non-blocking <code>waitpid()</code> loop to reap orphaned child processes.</li>
+<li>Supervises child processes with automatic restart upon unexpected termination.</li>
+<li>No LLM/VLM code, network calls, or non-deterministic inference runs inside PID 1.</li>
+</ul>
+
+<h2>Storage Architecture</h2>
+<div class="codebox">ReadOnly Base System (SquashFS)
+         +
+Writable Persistent Storage (/data)
+         +
+Writable Ephemeral Scratchpad (tmpfs)
+         &darr;
+OverlayFS Root Abstraction</div>
+</main>
+
+<footer>CUA-AgentOS &bull; System Architecture</footer>
+</body>
+</html>

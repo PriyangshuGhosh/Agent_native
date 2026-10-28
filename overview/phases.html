@@ -1,0 +1,97 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Execution Phases | CUA-AgentOS</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<nav>
+<div class="brand">CUA-AgentOS</div>
+<a href="index.html">Overview</a>
+<a href="architecture.html">Architecture</a>
+<a class="active" href="phases.html">Phases</a>
+<a href="agent.html">Agent Logic</a>
+<a href="testing.html">Testing</a>
+<a href="requirements.html">Requirements</a>
+<a href="timeline.html">Timeline</a>
+</nav>
+
+<main>
+<h1>Vertical-Slice Engineering Strategy</h1>
+<div class="warning">
+Informational grouping only Build from lowest-latency capability primitives upward.mdash; the canonical work breakdown and gates are the 8 cycles on the <a href="timeline.html">Timeline</a>. Build from lowest-latency capability primitives upward. Do not attempt full OS packaging before interaction and execution loops are proven.
+</div>
+
+<section class="phase">
+<span class="tag">PHASE 1</span>
+<h2>Interaction &amp; Semantic Primitives</h2>
+<p>Validate the core control mechanisms inside a standard Linux development environment.</p>
+<ol>
+<li>Launch headless Wayland compositor with a virtual display output.</li>
+<li>Extract live UI hierarchy via D-Bus AT-SPI2 calls into structured JSON.</li>
+<li>Execute actions directly via AT-SPI <code>DoAction</code> and <code>SetTextContents</code> interfaces.</li>
+<li>Inject fallback synthetic inputs via <code>/dev/uinput</code>.</li>
+<li>Capture screen frames via <code>wlr-screencopy</code> protocol at &ge;10 FPS.</li>
+</ol>
+<strong>Gate:</strong> Deterministic script completes target UI actions headlessly with exit code 0.
+</section>
+
+<section class="phase">
+<span class="tag">PHASE 2</span>
+<h2>Custom PID 1 &amp; Boot Infrastructure</h2>
+<p>Replace standard init systems with the dedicated <code>agent-init</code> binary.</p>
+<ol>
+<li>Implement <code>agent-init.c</code> with VFS mounts and signal handling.</li>
+<li>Compile minimal Linux kernel defconfig (DRM/KMS, uinput, OverlayFS).</li>
+<li>Configure bootloader with <code>init=/usr/bin/agent-init</code>.</li>
+<li>Initialize D-Bus session bus and headless compositor directly from PID 1.</li>
+<li>Verify boot sequence under QEMU serial console.</li>
+</ol>
+<strong>Gate:</strong> Serial log emits <code>PID1_READY</code> &le;1000ms after kernel start and <code>AGENTD_READY</code> &le;3000ms after <code>PID1_READY</code>, without systemd or display managers.
+</section>
+
+<section class="phase">
+<span class="tag">PHASE 3</span>
+<h2>3-Tier Capability Engine</h2>
+<p>Implement the autonomous capability router.</p>
+<ol>
+<li>Implement Tier 1: In-memory dynamic library loader (<code>dlopen</code>) and Wasm runner.</li>
+<li>Implement Tier 2: Headless process orchestrator with CDP WebSocket and IPC pipes.</li>
+<li>Implement Tier 3: Off-screen Wayland workspace manager with AT-SPI semantic driving.</li>
+<li>Implement pre-action validation and post-action state verification.</li>
+</ol>
+<strong>Gate:</strong> Agent executes 3 varied tasks across all 3 tiers with zero visual UI displayed.
+</section>
+
+<section class="phase">
+<span class="tag">PHASE 4</span>
+<h2>Lifecycle Management &amp; Storage</h2>
+<p>Enable autonomous software acquisition and state isolation.</p>
+<ol>
+<li>Configure SquashFS base rootfs with OverlayFS writable branches.</li>
+<li>Implement application registry supporting CLI binaries, AppImages, and libraries.</li>
+<li>Agent autonomously fetches, stages, and executes an external capability.</li>
+<li>Implement transactional rollback on failed or corrupted installations.</li>
+</ol>
+<strong>Gate:</strong> Clean uninstalled capability acquired, executed, and verified end-to-end.
+</section>
+
+<section class="phase">
+<span class="tag">PHASE 5</span>
+<h2>Reproducible ISO &amp; Evaluation</h2>
+<p>Package the verified operating system into a portable distribution artifact.</p>
+<ol>
+<li>Assemble reproducible hybrid ISO build pipeline.</li>
+<li>Validate automated unattended boot in QEMU under KVM.</li>
+<li>Execute complete rubric evaluation suite via guest serial link.</li>
+<li>Perform bare-metal hardware validation.</li>
+</ol>
+<strong>Gate:</strong> ISO boots and passes all rubric test suites autonomously.
+</section>
+</main>
+
+<footer>CUA-AgentOS &bull; Execution Phases</footer>
+</body>
+</html>

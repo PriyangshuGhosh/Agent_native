@@ -1,0 +1,61 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Requirements | CUA-AgentOS</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<nav>
+<div class="brand">CUA-AgentOS</div>
+<a href="index.html">Overview</a>
+<a href="architecture.html">Architecture</a>
+<a href="phases.html">Phases</a>
+<a href="agent.html">Agent Logic</a>
+<a href="testing.html">Testing</a>
+<a class="active" href="requirements.html">Requirements</a>
+<a href="timeline.html">Timeline</a>
+</nav>
+
+<main>
+<h1>System Requirements Matrix</h1>
+<p class="lead">Consolidated, non-redundant engineering requirements from kernel handoff to final evaluation.</p>
+
+<ol class="requirements">
+<li>Configure minimal Linux kernel with DRM/KMS, uinput, and OverlayFS support.</li>
+<li>Implement custom PID 1 binary (<code>agent-init</code>) in POSIX C.</li>
+<li>Mount essential virtual filesystems (<code>/proc</code>, <code>/sys</code>, <code>/dev</code>, <code>/dev/pts</code>, <code>/run</code>, <code>/tmp</code>).</li>
+<li>Implement non-blocking child process reaping and signal handling in PID 1.</li>
+<li>Initialize session D-Bus daemon automatically during early boot.</li>
+<li>Deploy lightweight Wayland compositor with headless backend support.</li>
+<li>Allocate headless virtual display buffer (<code>HEADLESS-1</code>) in VRAM/RAM.</li>
+<li>Implement framebuffer extraction via <code>wlr-screencopy</code> protocol (&ge;10 FPS).</li>
+<li>Implement AT-SPI2 D-Bus client for hierarchical UI widget extraction.</li>
+<li>Implement direct AT-SPI action invocation (<code>DoAction</code>, <code>SetTextContents</code>).</li>
+<li>Implement <code>/dev/uinput</code> virtual mouse and keyboard event injector.</li>
+<li>Build coordinate normalization layer mapping screen space to input space.</li>
+<li>Implement Tier 1 in-memory library linking via FFI and WebAssembly runner.</li>
+<li>Implement Tier 2 headless IPC bridge for CDP WebSockets, stdio, and Unix sockets.</li>
+<li>Implement Tier 3 off-screen virtual window manager and focus controller.</li>
+<li>Build capability router mapping natural-language intents to execution tiers.</li>
+<li>Implement pre-action validation verifying preconditions before invocation.</li>
+<li>Implement post-action state verifier confirming task completion.</li>
+<li>Implement failure recovery engine triggering replanning upon anomaly detection.</li>
+<li>Design immutable SquashFS base filesystem image.</li>
+<li>Configure OverlayFS with persistent writable storage for dynamic state.</li>
+<li>Integrate autonomous package manager supporting AppImages, binaries, and libraries.</li>
+<li>Implement application registry maintaining structured capability manifests.</li>
+<li>Deploy system watchdog detecting process hangs and deadlocks.</li>
+<li>Implement user emergency stop interrupt handler.</li>
+<li>Construct automated headless QEMU testing harness.</li>
+<li>Build automated hybrid bootable ISO generation pipeline.</li>
+<li>Verify bare-metal hardware compatibility and DRM display binding.</li>
+<li>Implement structured serial telemetry logging for grading verification.</li>
+<li>Achieve 100% automated pass rate across rubric evaluation matrix.</li>
+</ol>
+</main>
+
+<footer>CUA-AgentOS &bull; Requirements Matrix</footer>
+</body>
+</html>

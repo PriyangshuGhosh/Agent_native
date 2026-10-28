@@ -1,0 +1,74 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Testing | CUA-AgentOS</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<nav>
+<div class="brand">CUA-AgentOS</div>
+<a href="index.html">Overview</a>
+<a href="architecture.html">Architecture</a>
+<a href="phases.html">Phases</a>
+<a href="agent.html">Agent Logic</a>
+<a class="active" href="testing.html">Testing</a>
+<a href="requirements.html">Requirements</a>
+<a href="timeline.html">Timeline</a>
+</nav>
+
+<main>
+<h1>Verification &amp; Evaluation Harness</h1>
+<p class="lead">Deterministic, machine-verifiable test assertions across all system layers.</p>
+
+<h2>Boot Verification</h2>
+<ul>
+<li>Assert <code>/proc/cmdline</code> contains <code>init=/usr/bin/agent-init</code>.</li>
+<li>Assert <code>ps -p 1 -o comm=</code> returns <code>agent-init</code>.</li>
+<li>Assert no desktop managers (GDM, LightDM, systemd) exist in process tree.</li>
+<li>Assert mounts: <code>/proc</code>, <code>/sys</code>, <code>/dev</code>, <code>/run</code>, <code>/tmp</code> are mounted correctly.</li>
+</ul>
+
+<h2>3-Tier Capability Assertions</h2>
+<ul>
+<li><strong>Tier 1 Test:</strong> Load shared library into RAM via FFI, execute compute function, assert result.</li>
+<li><strong>Tier 2 Test:</strong> Launch headless Chromium, connect over CDP WebSocket, execute DOM query, assert response.</li>
+<li><strong>Tier 3 Test:</strong> Launch GUI app on <code>HEADLESS-1</code>, query AT-SPI tree over D-Bus, invoke action, assert state change.</li>
+</ul>
+
+<h2>Robustness Matrix</h2>
+<table>
+<tr><th>Fault Condition</th><th>Detection Mechanism</th><th>Expected Recovery Behavior</th></tr>
+<tr><td>Deadlocked GUI dialog</td><td>AT-SPI modal state detection</td><td>Dismiss modal or route Enter key via uinput</td></tr>
+<tr><td>Process crash / segfault</td><td>PID 1 SIGCHLD handler</td><td>Log crash, clean scratchpad, restart or replan</td></tr>
+<tr><td>Package install failure</td><td>Non-zero installer exit code</td><td>Roll back OverlayFS upperdir, notify planner</td></tr>
+<tr><td>Target element missing</td><td>Semantic AT-SPI query miss</td><td>Fall back to screencopy visual detection</td></tr>
+<tr><td>Hardware GPU unavailable</td><td>DRM device probe failure</td><td>Degrade gracefully to headless software rasterizer</td></tr>
+<tr><td>Human emergency stop</td><td>SIGUSR1 / physical hotkey</td><td>Halt agent input immediately, yield control</td></tr>
+</table>
+
+<h2>Performance Benchmarks</h2>
+<ul>
+<li>Power-on &rarr; PID 1 ready: &le;1,000 ms</li>
+<li>PID 1 &rarr; Agent Runtime ready: &le;3,000 ms</li>
+<li>Tier 1 invocation latency: &le;1 ms</li>
+<li>Tier 2 headless invocation latency: &le;50 ms</li>
+<li>Tier 3 AT-SPI query latency: &le;20 ms</li>
+<li>Frame capture throughput: &ge;10 FPS</li>
+</ul>
+
+<h2>Grading Rubric Matrix</h2>
+<table>
+<tr><th>Rubric Item</th><th>Target Weight</th><th>Machine Evidence</th></tr>
+<tr><td>Kernel Handoff to Custom Init</td><td>20%</td><td>Serial log confirmation of <code>/proc/cmdline</code></td></tr>
+<tr><td>Custom PID 1 Process Tree</td><td>20%</td><td>Clean <code>pstree</code> output with <code>agent-init</code> as root</td></tr>
+<tr><td>Semantic &amp; Input Operation</td><td>25%</td><td>Verified AT-SPI and uinput interaction execution</td></tr>
+<tr><td>Application Lifecycle Management</td><td>25%</td><td>Live acquisition, execution, and artifact verification</td></tr>
+<tr><td>Immutable Build &amp; Bootable ISO</td><td>10%</td><td>Automated QEMU boot and clean test completion</td></tr>
+</table>
+</main>
+
+<footer>CUA-AgentOS &bull; Verification &amp; Testing</footer>
+</body>
+</html>

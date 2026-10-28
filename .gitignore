@@ -1,0 +1,11 @@
+# secrets — never commit, never bake into rootfs/ISO
+*.env
+.env*
+# build outputs
+/build/
+/out/
+*.iso
+*.squashfs
+*.cpio*
+*.qcow2
+target/

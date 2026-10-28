@@ -1,0 +1,133 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Agent Logic &amp; Runtime | CUA-AgentOS</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<nav>
+<div class="brand">CUA-AgentOS</div>
+<a href="index.html">Overview</a>
+<a href="architecture.html">Architecture</a>
+<a href="phases.html">Phases</a>
+<a class="active" href="agent.html">Agent Logic</a>
+<a href="testing.html">Testing</a>
+<a href="requirements.html">Requirements</a>
+<a href="timeline.html">Timeline</a>
+</nav>
+
+<main>
+<h1>Agent Architecture &amp; Execution Logic</h1>
+<p class="lead">Deterministic on-metal execution paired with offloaded cloud reasoning, optimized for 8 GB RAM host environments.</p>
+
+<div class="callout">
+<strong>Design Axiom:</strong> The operating system kernel and local daemon (<code>agentd</code>) remain deterministic, fast, and free of neural weights. Probabilistic reasoning, planning, and vision models execute in the cloud, streaming structured JSON-RPC directives to the local runtime.
+</div>
+
+<h2>Hybrid Edge-Cloud Topology</h2>
+<div class="architecture">
+<pre>
+┌────────────────────────────────────────────────────────┐
+│             CLOUD COGNITIVE ENGINE (REMOTE)            │
+│   Frontier LLM / VLM (Google Gemini API)               │
+│   • Intent Decomposition &amp; Task Planning               │
+│   • Semantic UI Element Resolution                     │
+│   • Structured Tool-Call Synthesis (JSON-RPC)          │
+└───────────────────────────▲────────────────────────────┘
+                            │  HTTPS / WebSockets
+                            │  (AT-SPI JSON &Delta; &amp; WebP Fallback)
+┌───────────────────────────▼────────────────────────────┐
+│              ON-METAL HOST (Laptop &le; 8 GB RAM)         │
+│                                                        │
+│   [agentd] Native System Daemon (Rust)                 │
+│   • AT-SPI JSON Serializer &amp; Frame Scraper             │
+│   • Local Action Bounds &amp; Security Validator           │
+│   • 3-Tier Execution Dispatcher                        │
+│   • Pre-action &amp; Post-action State Verifier            │
+│                                                        │
+│   [Platform Plumbing]                                  │
+│   • cage Wayland Compositor (Output: HEADLESS-1)       │
+│   • D-Bus Session Bus (org.a11y.Bus)                   │
+│   • agent-init (Custom PID 1)                          │
+│   • Minimal Linux Kernel + OverlayFS                   │
+└────────────────────────────────────────────────────────┘
+</pre>
+</div>
+
+<h2>8 GB Host Memory Allocation Budget</h2>
+<table>
+<tr><th>Subsystem</th><th>RAM Allocation</th><th>Functional Role</th></tr>
+<tr><td>Linux Kernel &amp; DRM Drivers</td><td>~120 MB</td><td>Hardware abstraction, GPU rendering nodes, page allocator</td></tr>
+<tr><td>agent-init (PID 1) + D-Bus</td><td>~35 MB</td><td>VFS mounts, orphan process reaping, IPC session bus</td></tr>
+<tr><td>cage Wayland Compositor</td><td>~80 MB</td><td>Headless display server on HEADLESS-1 virtual output</td></tr>
+<tr><td>agentd Runtime Daemon</td><td>~45 MB</td><td>Telemetry harvester, protocol bridge, local dispatcher</td></tr>
+<tr><td>Active Target Applications</td><td>1,500 &ndash; 3,000 MB</td><td>Productivity software performing requested workloads</td></tr>
+<tr><td>OverlayFS &amp; Disk Cache</td><td>~500 MB</td><td>Ephemeral writable scratchpad and page caches</td></tr>
+<tr><td>Available Headroom</td><td>~4,000+ MB</td><td>Buffer for spikes and memory-intensive processing</td></tr>
+</table>
+
+<h2>Wire Protocol &amp; Execution Cycle</h2>
+<div class="flow">
+<span>1. Harvest AT-SPI JSON</span><b>&rarr;</b>
+<span>2. Transmit &Delta; to Cloud</span><b>&rarr;</b>
+<span>3. Ingest JSON Directive</span><b>&rarr;</b>
+<span>4. Validate Bounds</span><b>&rarr;</b>
+<span>5. Dispatch to Tier</span><b>&rarr;</b>
+<span>6. Verify Postcondition</span>
+</div>
+
+<h2>3-Tier Local Dispatcher Mechanics</h2>
+<div class="grid">
+<div class="card">
+<h3>Tier 1 &bull; In-Memory FFI / WASI</h3>
+<p>Executes direct dynamic library calls (<code>dlopen</code>/<code>dlsym</code>) and WebAssembly Component modules inside shared host memory. Zero IPC, sub-millisecond execution.</p>
+</div>
+<div class="card">
+<h3>Tier 2 &bull; Headless Sockets &amp; CLI</h3>
+<p>Drives native background engines via Chrome DevTools Protocol (CDP) WebSockets, Unix domain sockets, and stdio streams at raw native silicon throughput.</p>
+</div>
+<div class="card">
+<h3>Tier 3 &bull; Off-Screen Wayland (AT-SPI)</h3>
+<p>Routes GUI applications to virtual display output <code>HEADLESS-1</code>. Interrogates widgets over D-Bus; injects synthetic input via <code>/dev/uinput</code>.</p>
+</div>
+</div>
+
+<h2>Structured Directive Schema</h2>
+<div class="codebox">{
+  "task_id": "task_4091",
+  "step": 3,
+  "tier": 3,
+  "action": "atspi_invoke",
+  "target": {
+    "service": "org.gnome.TextEditor",
+    "path": "/org/a11y/atspi/accessible/window_0/btn_save"
+  },
+  "params": {
+    "action_index": 0
+  },
+  "validation": {
+    "expected_role": "PUSH_BUTTON",
+    "precondition_state": ["VISIBLE", "ENABLED"],
+    "expected_postcondition": "DIALOG_SAVE_PRESENT"
+  }
+}</div>
+
+<h2>Local Guardrails &amp; Safety Circuit Breakers</h2>
+<table>
+<tr><th>Guardrail</th><th>Threshold</th><th>Enforcement Logic</th></tr>
+<tr><td>Action Boundary Clamping</td><td>Active display resolution</td><td>Coordinates outside active bounding box rejected instantly</td></tr>
+<tr><td>Execution Timeout</td><td>30 seconds per step</td><td>agentd sends SIGKILL to runaway task and notifies cloud planner</td></tr>
+<tr><td>Self-Repair Budget</td><td>Maximum 3 iterations</td><td>Trips fallback path if repeated actions fail verification</td></tr>
+<tr><td>Emergency Stop</td><td>SIGUSR1 or physical hotkey</td><td>agentd unhooks uinput immediately and releases system control</td></tr>
+</table>
+
+<h2>Future On-Device Migration Path</h2>
+<p>The architecture allows upgrading from cloud-tethered reasoning to 100% air-gapped on-device execution without modifying the underlying operating system. The HTTP client inside <code>agentd</code> redirects to a local Unix domain socket (<code>/run/inference.sock</code>) hosting a quantized 3B&ndash;7B parameter small language model running on the host CPU or integrated GPU via Vulkan.</p>
+</main>
+
+<footer>CUA-AgentOS &bull; Agent Logic Specification</footer>
+</body>
+</html>
+

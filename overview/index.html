@@ -1,0 +1,83 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>CUA-AgentOS | Overview</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<nav>
+<div class="brand">CUA-AgentOS</div>
+<a class="active" href="index.html">Overview</a>
+<a href="architecture.html">Architecture</a>
+<a href="phases.html">Phases</a>
+<a href="agent.html">Agent Logic</a>
+<a href="testing.html">Testing</a>
+<a href="requirements.html">Requirements</a>
+<a href="timeline.html">Timeline</a>
+</nav>
+
+<main>
+<section class="hero">
+<span class="eyebrow">CAPSTONE SPECIFICATION</span>
+<h1>CUA-AgentOS</h1>
+<p class="lead">Autonomous Capability-Centric Agent-Native Operating System</p>
+<div class="callout">
+<strong>Core Mission:</strong> A minimal Linux distribution booted directly into a custom PID 1 runtime where an autonomous agent operates as the primary user interface. Legacy GUI blindness is eliminated through a 3-tier execution model that prioritizes in-memory FFI/Wasm capabilities and headless socket IPC over raw pixel processing.
+</div>
+</section>
+
+<section>
+<h2>3-Tier Capability Hierarchy</h2>
+<div class="grid">
+<div class="card">
+<h3>Tier 1 &bull; In-Memory / WASI</h3>
+<p>Direct dynamic linking via FFI (<code>dlopen</code>) and WebAssembly Component execution in shared RAM. Bypasses processes, IPC, and GUI presentation entirely.</p>
+</div>
+<div class="card">
+<h3>Tier 2 &bull; Headless Sockets</h3>
+<p>Direct communication with native engines via Chrome DevTools Protocol (CDP), Unix domain sockets, and standard I/O streams at native silicon speeds.</p>
+</div>
+<div class="card">
+<h3>Tier 3 &bull; Off-Screen Virtual Head</h3>
+<p>Isolated rendering onto a headless Wayland output (<code>HEADLESS-1</code>). Driven semantically via AT-SPI D-Bus calls with screencopy and uinput fallbacks.</p>
+</div>
+</div>
+</section>
+
+<section>
+<h2>The Operational Closed Loop</h2>
+<div class="flow">
+<span>Intent Ingestion</span><b>&rarr;</b>
+<span>Tier Selection</span><b>&rarr;</b>
+<span>Semantic Grounding</span><b>&rarr;</b>
+<span>Action Execution</span><b>&rarr;</b>
+<span>State Verification</span><b>&rarr;</b>
+<span>Checkpoint / Replan</span>
+</div>
+</section>
+
+<section>
+<h2>Golden-Path Demonstration</h2>
+<div class="codebox">Boot Minimal Kernel
+  &darr;
+Kernel executes init=/usr/bin/agent-init (PID 1)
+  &darr;
+Mount /proc, /sys, /dev, /run, /tmp &amp; initialize DRM/KMS
+  &darr;
+Bootstrap D-Bus daemon &amp; Headless Wayland Compositor
+  &darr;
+Agent Runtime Initialized
+  &darr;
+Receive User Task &rarr; Resolve via 3-Tier Capability Router
+  &darr;
+Execute Task Headlessly &amp; Verify Artifact
+  &darr;
+Emit Result via Structured Telemetry</div>
+</section>
+</main>
+
+<footer>CUA-AgentOS &bull; Capability-Centric Operating System</footer>
+</body>
+</html>

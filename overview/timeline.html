@@ -1,0 +1,135 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Timeline | CUA-AgentOS</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<nav>
+<div class="brand">CUA-AgentOS</div>
+<a href="index.html">Overview</a>
+<a href="architecture.html">Architecture</a>
+<a href="phases.html">Phases</a>
+<a href="agent.html">Agent Logic</a>
+<a href="testing.html">Testing</a>
+<a href="requirements.html">Requirements</a>
+<a class="active" href="timeline.html">Timeline</a>
+</nav>
+
+<main>
+<h1>Continuous Execution Pipeline</h1>
+<p class="lead">Machine-verifiable cycles governed by automated assertions, bounded retries, and checkpoint gates.</p>
+
+<div class="timeline">
+<div class="week">
+<span>Cycle 01 &bull; Primitives</span>
+<h2>Interaction Slice</h2>
+<ul>
+<li>Headless Wayland setup</li>
+<li>AT-SPI D-Bus parser</li>
+<li>uinput injector</li>
+<li>Frame extraction (&ge;10 FPS)</li>
+</ul>
+<strong>Gate:</strong> <code>test-primitives.sh</code> exits 0.
+</div>
+
+<div class="week">
+<span>Cycle 02 &bull; Boot Core</span>
+<h2>Minimal PID 1</h2>
+<ul>
+<li>POSIX C <code>agent-init</code></li>
+<li>VFS mounts &amp; child reaping</li>
+<li>Kernel defconfig build</li>
+<li>QEMU boot verification</li>
+</ul>
+<strong>Gate:</strong> Serial log emits <code>PID1_READY</code> &le;1000ms after kernel start (agent runtime budget of &le;3000ms is gated in Cycle 03 via <code>AGENTD_READY</code>).
+</div>
+
+<div class="week">
+<span>Cycle 03 &bull; Integration</span>
+<h2>Native Environment</h2>
+<ul>
+<li>Bundle D-Bus &amp; compositor in rootfs</li>
+<li>Launch compositor from PID 1</li>
+<li>Execute AT-SPI test under custom init</li>
+<li>Pipe telemetry to serial port</li>
+</ul>
+<strong>Gate:</strong> <code>INTERACTION_CYCLE_VERIFIED</code> on serial.
+</div>
+
+<div class="week">
+<span>Cycle 04 &bull; Routing</span>
+<h2>3-Tier Capability Engine</h2>
+<ul>
+<li>Tier 1: FFI (<code>dlopen</code>) runner</li>
+<li>Tier 2: Headless CDP/IPC bridge</li>
+<li>Tier 3: Off-screen Wayland router</li>
+<li>Dynamic capability selector</li>
+</ul>
+<strong>Gate:</strong> All 3 tier test suites exit 0.
+</div>
+
+<div class="week">
+<span>Cycle 05 &bull; Cognition</span>
+<h2>Planning &amp; Verification</h2>
+<ul>
+<li>Structured intent parser</li>
+<li>Pre-action validation</li>
+<li>Post-action state verifier</li>
+<li>Replanning watchdog</li>
+</ul>
+<strong>Gate:</strong> Autonomous multi-step workflow completes.
+</div>
+
+<div class="week">
+<span>Cycle 06 &bull; Storage</span>
+<h2>OverlayFS &amp; Lifecycle</h2>
+<ul>
+<li>SquashFS read-only base rootfs</li>
+<li>OverlayFS persistent writable upperdir</li>
+<li>Package acquisition &amp; registry</li>
+<li>Atomic rollback engine</li>
+</ul>
+<strong>Gate:</strong> Autonomous install &rarr; run &rarr; verify loop passes.
+</div>
+
+<div class="week">
+<span>Cycle 07 &bull; Packaging</span>
+<h2>Reproducible ISO</h2>
+<ul>
+<li>Kernel and initramfs bundling</li>
+<li>GRUB/Syslinux boot configuration</li>
+<li>Automated ISO creation script</li>
+<li>Clean QEMU boot test</li>
+</ul>
+<strong>Gate:</strong> ISO boots to agent prompt without human input.
+</div>
+
+<div class="week">
+<span>Cycle 08 &bull; Evaluation</span>
+<h2>Verification &amp; Delivery</h2>
+<ul>
+<li>Execute automated grading matrix</li>
+<li>Stress-test robustness and recoveries</li>
+<li>Log telemetry and performance data</li>
+<li>Codebase and artifact freeze</li>
+</ul>
+<strong>Gate:</strong> 100% pass mark across rubric matrix.
+</div>
+</div>
+
+<h2>Operational Circuit Breakers</h2>
+<table>
+<tr><th>Parameter</th><th>Constraint</th><th>Enforcement Action</th></tr>
+<tr><td>Cycle Repair Budget</td><td>Maximum 3 attempts</td><td>Trigger fallback implementation branch</td></tr>
+<tr><td>Gate Timeout</td><td>300 seconds maximum</td><td>SIGKILL process, dump core, abort cycle</td></tr>
+<tr><td>Checkpointing</td><td>Passing gate assertion</td><td>Automated Git commit tagged with cycle ID</td></tr>
+<tr><td>Action Bounds</td><td>Bounded coordinates</td><td>Pre-action validator rejects invalid input</td></tr>
+</table>
+</main>
+
+<footer>CUA-AgentOS &bull; Execution Pipeline</footer>
+</body>
+</html>
