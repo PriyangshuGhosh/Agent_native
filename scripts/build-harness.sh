@@ -5,7 +5,8 @@
 # AGENTD / TIER1_LIB (scripts/build-rootfs-04.sh) add agentd and its Tier 1 test library; PLAN_FIXTURE
 # (scripts/build-rootfs-05.sh) adds the recorded Gemini plan agentd replays; BASE_FS=squashfs / PACKAGES_DIR
 # (scripts/build-rootfs-06.sh) ship the root as a read-only SquashFS under a tmpfs-backed OverlayFS, plus the
-# capability packages agentd installs.
+# capability packages agentd installs; BASE_FS=iso (scripts/build-iso-07.sh) instead finds that SquashFS as
+# /rootfs.squashfs on the boot CD (/dev/sr0). Timestamps come from SOURCE_DATE_EPOCH so images are reproducible.
 set -eu
 
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
@@ -13,6 +14,7 @@ OUT=${HARNESS_OUT:-$ROOT/build/harness}
 INIT=${HARNESS_INIT:-/sbin/harness-init}
 W=$OUT/work
 R=$W/root
+EPOCH=${SOURCE_DATE_EPOCH:-1700000000}
 ALPINE=${ALPINE_MIRROR:-https://dl-cdn.alpinelinux.org/alpine}/v3.24
 APK_TOOLS=apk-tools-static-3.0.8-r0.apk
 PKGS="alpine-baselayout busybox busybox-static kmod linux-virt eudev dbus at-spi2-core cage mousepad
@@ -54,6 +56,7 @@ if [ -n "${PACKAGES_DIR:-}" ]; then
 	done
 fi
 
+rm -f "$R/var/log/apk.log"  # install timestamps; the only non-reproducible file in the tree
 cp "$R/boot/vmlinuz-virt" "$OUT/vmlinuz"
 
 # Tiny initramfs: static busybox loads the block/fs modules, mounts /dev/vda, switch_roots to harness-init.
@@ -62,7 +65,11 @@ I=$W/initramfs
 mkdir -p "$I/bin" "$I/dev" "$I/proc" "$I/newroot" "$I/lib"
 cp "$R/bin/busybox.static" "$I/bin/busybox"
 # Resolve deps from modules.dep, deps first; stored uncompressed so busybox insmod can load them.
-if [ "${BASE_FS:-}" = squashfs ]; then MODS="virtio_blk squashfs overlay"; else MODS="virtio_blk ext4"; fi
+case ${BASE_FS:-} in
+squashfs) MODS="virtio_blk squashfs overlay" DEV=/dev/vda SQUASH=/dev/vda ;;
+iso) MODS="sr_mod isofs loop squashfs overlay" DEV=/dev/sr0 SQUASH=/cd/rootfs.squashfs ;;
+*) MODS="virtio_blk ext4" DEV=/dev/vda ;;
+esac
 awk -F': *' -v want="$MODS" '
 	{ dep[$1] = $2; n = $1; sub(/.*\//, "", n); sub(/\.ko.*/, "", n); path[n] = $1 }
 	function load(f,   a, i, k) { if (f in seen) return; seen[f]; k = split(dep[f], a, " "); for (i = k; i >= 1; i--) load(a[i]); print f }
@@ -77,17 +84,21 @@ cat >"$I/init" <<'INIT'
 /bin/busybox mount -t proc proc /proc
 /bin/busybox mount -t devtmpfs dev /dev
 for m in $(/bin/busybox cat /modlist); do /bin/busybox insmod /lib/$m; done
-while [ ! -b /dev/vda ]; do /bin/busybox usleep 10000; done
+while [ ! -b DEV ]; do /bin/busybox usleep 10000; done
 MOUNT_ROOT
 /bin/busybox umount /proc
 /bin/busybox mount --move /dev /newroot/dev
 exec /bin/busybox switch_root /newroot /sbin/harness-init
 INIT
-if [ "${BASE_FS:-}" = squashfs ]; then
+if [ -n "${BASE_FS:-}" ]; then
+	[ "$BASE_FS" = squashfs ] || cat >"$W/mount-root" <<'MOUNT'
+/bin/busybox mkdir -p /cd
+/bin/busybox mount -t iso9660 -o ro /dev/sr0 /cd || { echo "initramfs: mount cdrom failed"; /bin/busybox poweroff -f; }
+MOUNT
 	# Read-only SquashFS lower + tmpfs upper/work -> OverlayFS root; both layers stay visible under /mnt.
-	cat >"$W/mount-root" <<'MOUNT'
+	cat >>"$W/mount-root" <<'MOUNT'
 /bin/busybox mkdir -p /lower /rw
-/bin/busybox mount -t squashfs -o ro /dev/vda /lower || { echo "initramfs: mount squashfs failed"; /bin/busybox poweroff -f; }
+/bin/busybox mount -t squashfs -o ro SQUASH /lower || { echo "initramfs: mount squashfs failed"; /bin/busybox poweroff -f; }
 /bin/busybox mount -t tmpfs -o mode=0755 rw /rw
 /bin/busybox mkdir /rw/upper /rw/work
 /bin/busybox mount -t overlay overlay -o lowerdir=/lower,upperdir=/rw/upper,workdir=/rw/work /newroot || { echo "initramfs: mount overlay failed"; /bin/busybox poweroff -f; }
@@ -95,15 +106,22 @@ if [ "${BASE_FS:-}" = squashfs ]; then
 /bin/busybox mount --move /rw /newroot/mnt/rw
 MOUNT
 	mkdir -p "$R/mnt/base" "$R/mnt/rw" "$R/data"
+	if [ "$BASE_FS" = iso ]; then
+		echo '/bin/busybox mount --move /cd /newroot/mnt/cd' >>"$W/mount-root"
+		mkdir -p "$R/mnt/cd"
+	fi
 else
 	echo '/bin/busybox mount -t ext4 /dev/vda /newroot || { echo "initramfs: mount /dev/vda failed"; /bin/busybox poweroff -f; }' >"$W/mount-root"
 fi
+sed -i -e "s|DEV|${DEV:-}|; s|SQUASH|${SQUASH:-}|" "$I/init" "$W/mount-root"
 sed -i -e "/^MOUNT_ROOT\$/{r $W/mount-root" -e 'd}' -e "s|/sbin/harness-init|$INIT|" "$I/init"
 chmod 0755 "$I/init"
-(cd "$I" && find . | cpio -o -H newc -R 0:0 --quiet | gzip -9) >"$OUT/initramfs"
+(cd "$I" && find . -exec touch -h -d "@$EPOCH" {} + && find . | LC_ALL=C sort |
+	cpio -o -H newc -R 0:0 --reproducible --quiet | gzip -9n) >"$OUT/initramfs"
 
-if [ "${BASE_FS:-}" = squashfs ]; then
-	mksquashfs "$R" "$OUT/rootfs.squashfs" -comp zstd -all-root -noappend -quiet -no-progress
+if [ -n "${BASE_FS:-}" ]; then
+	env -u SOURCE_DATE_EPOCH mksquashfs "$R" "$OUT/rootfs.squashfs" -comp zstd -all-root -noappend -quiet -no-progress \
+		-reproducible -no-xattrs -mkfs-time "$EPOCH" -all-time "$EPOCH"
 else
 	fakeroot /usr/sbin/mke2fs -q -t ext4 -L harness -d "$R" "$W/rootfs.img" 2G
 	qemu-img convert -O qcow2 "$W/rootfs.img" "$OUT/rootfs.qcow2"
