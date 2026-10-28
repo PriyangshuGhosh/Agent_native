@@ -1,6 +1,7 @@
 #!/bin/sh
 # Build Cycle 04 into build/rootfs-04/{vmlinuz,initramfs,rootfs.qcow2}: the Cycle 03 image plus agentd as
 # agent-init's final workload and its Tier 1 test library. No root needed; Rust comes from ~/.cargo (rustup).
+# ROOTFS_OUT / PLAN_FIXTURE let scripts/build-rootfs-05.sh reuse this.
 set -eu
 
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
@@ -29,6 +30,6 @@ gcc -shared -fPIC -nostdlib -O2 -Wall -Wextra -Werror -o "$B/libtier1.so" "$ROOT
 
 gcc -static -Os -std=c99 -Wall -Wextra -Werror -o "$B/agent-init-04.static" "$ROOT/agent-init/agent-init.c"
 strip "$B/agent-init-04.static"
-HARNESS_OUT=$B/rootfs-04 HARNESS_INIT=/usr/bin/agent-init AGENT_INIT=$B/agent-init-04.static \
+HARNESS_OUT=${ROOTFS_OUT:-$B/rootfs-04} HARNESS_INIT=/usr/bin/agent-init AGENT_INIT=$B/agent-init-04.static \
 AGENTD=$B/agentd-target/x86_64-unknown-linux-musl/release/agentd TIER1_LIB=$B/libtier1.so \
 	exec "$ROOT/scripts/build-harness.sh"

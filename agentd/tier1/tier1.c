@@ -10,3 +10,13 @@ unsigned long long tier1_fib(unsigned n)
 	}
 	return a;
 }
+
+/* Cycle 05 workflow validation step: FNV-1a 32-bit over a byte buffer. */
+unsigned tier1_fnv1a(const unsigned char *p, unsigned long n)
+{
+	unsigned h = 2166136261u;
+
+	while (n--)
+		h = (h ^ *p++) * 16777619u;
+	return h;
+}

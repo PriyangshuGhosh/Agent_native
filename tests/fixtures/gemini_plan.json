@@ -1,0 +1,39 @@
+{
+ "_comment": "Recorded gemini-2.5-flash generateContent responses, replayed in order: [0] = initial plan, [1..] = one per REPLAN_TRIGGERED. Each part's text is the directive JSON. Gates never call the live API.",
+ "model": "gemini-2.5-flash",
+ "intent": "Type a note into the editor, upper-case it headlessly, then checksum it in-process",
+ "responses": [
+  {
+   "candidates": [
+    {
+     "content": {
+      "role": "model",
+      "parts": [
+       {
+        "text": "{\"task_id\": \"t05-note-upper-checksum\", \"directives\": [{\"task_id\": \"t05-note-upper-checksum\", \"step\": 1, \"tier\": 3, \"action\": \"set_text\", \"target\": \"mousepad\", \"params\": {\"text\": \"hello agentos\"}, \"validation\": {\"expected_role\": \"entry\", \"precondition_state\": {\"states\": [\"editable\", \"enabled\"]}, \"expected_postcondition\": {\"output\": \"hello agentos\"}}}, {\"task_id\": \"t05-note-upper-checksum\", \"step\": 2, \"tier\": 2, \"action\": \"pipe\", \"target\": \"/usr/bin/tr\", \"params\": {\"args\": [\"a-z\", \"A-Z\"], \"stdin\": \"$1\"}, \"validation\": {\"expected_role\": null, \"precondition_state\": {\"path_exists\": \"/usr/bin/tr\"}, \"expected_postcondition\": {\"output\": \"HELLO AGENTOS\"}}}, {\"task_id\": \"t05-note-upper-checksum\", \"step\": 3, \"tier\": 1, \"action\": \"ffi_call\", \"target\": \"/run/agentd/libtier1.so\", \"params\": {\"symbol\": \"tier1_fnv1a\", \"input\": \"$2\"}, \"validation\": {\"expected_role\": null, \"precondition_state\": {\"path_exists\": \"/run/agentd/libtier1.so\"}, \"expected_postcondition\": {\"output\": 1364236356}}}]}"
+       }
+      ]
+     },
+     "finishReason": "STOP"
+    }
+   ],
+   "modelVersion": "gemini-2.5-flash"
+  },
+  {
+   "candidates": [
+    {
+     "content": {
+      "role": "model",
+      "parts": [
+       {
+        "text": "{\"task_id\": \"t05-note-upper-checksum\", \"directives\": [{\"task_id\": \"t05-note-upper-checksum\", \"step\": 1, \"tier\": 3, \"action\": \"set_text\", \"target\": \"mousepad\", \"params\": {\"text\": \"hello agentos\"}, \"validation\": {\"expected_role\": \"text\", \"precondition_state\": {\"states\": [\"editable\", \"enabled\"]}, \"expected_postcondition\": {\"output\": \"hello agentos\"}}}]}"
+       }
+      ]
+     },
+     "finishReason": "STOP"
+    }
+   ],
+   "modelVersion": "gemini-2.5-flash"
+  }
+ ]
+}

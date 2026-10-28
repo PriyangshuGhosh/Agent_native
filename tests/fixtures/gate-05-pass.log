@@ -1,0 +1,17 @@
+
+{"ts_ms":382,"event":"PID1_READY","pid":1,"comm":"agent-init","mounts":{"/proc":"proc","/sys":"sysfs","/dev":"devtmpfs","/dev/pts":"devpts","/run":"tmpfs","/tmp":"tmpfs"},"reap_test":{"pid":465,"reaped":true},"zombies":0,"user_procs":1}
+{"ts_ms":2075,"event":"AGENTD_READY","pid":828,"bus":"/run/user/0/bus","wayland":"/run/user/0/wayland-0"}
+{"ts_ms":2081,"event":"CAPABILITY_VERIFIED","tier":1,"primitive":"ffi_compute","status":"ok","expected":12586269025,"actual":12586269025,"latency_ms":0.085,"budget_ms":1.0}
+{"ts_ms":2087,"event":"TIER1_PASS","primitive":"ffi_compute","latency_ms":0.085,"budget_ms":1.0}
+{"ts_ms":2091,"event":"CAPABILITY_VERIFIED","tier":2,"primitive":"headless_pipe","status":"ok","expected":"AGENTD TIER2 PIPE\n","actual":"AGENTD TIER2 PIPE\n","latency_ms":0.709,"budget_ms":50.0}
+{"ts_ms":2097,"event":"TIER2_PASS","primitive":"headless_pipe","latency_ms":0.709,"budget_ms":50.0}
+{"ts_ms":2638,"event":"CAPABILITY_VERIFIED","tier":3,"primitive":"atspi_ui","status":"ok","expected":"agentd-tier3","actual":"agentd-tier3","latency_ms":4.443,"budget_ms":20.0}
+{"ts_ms":2639,"event":"TIER3_PASS","primitive":"atspi_ui","latency_ms":4.443,"budget_ms":20.0}
+{"ts_ms":2644,"event":"TASK_START","task_id":"t05-note-upper-checksum","intent":"Type a note into the editor, upper-case it headlessly, then checksum it in-process","model":"gemini-2.5-flash","steps":3,"source":"recorded"}
+{"ts_ms":2737,"event":"REPLAN_TRIGGERED","task_id":"t05-note-upper-checksum","step":1,"tier":3,"reason":"precondition: mousepad widget role is \"text\", expected \"entry\"","attempt":1,"budget":3}
+{"ts_ms":2740,"event":"STEP_VERIFIED","task_id":"t05-note-upper-checksum","step":1,"tier":3,"action":"set_text","status":"ok","output":"hello agentos","latency_ms":0.597}
+{"ts_ms":2741,"event":"STEP_VERIFIED","task_id":"t05-note-upper-checksum","step":2,"tier":2,"action":"pipe","status":"ok","output":"HELLO AGENTOS","latency_ms":0.411}
+{"ts_ms":2741,"event":"STEP_VERIFIED","task_id":"t05-note-upper-checksum","step":3,"tier":1,"action":"ffi_call","status":"ok","output":1364236356,"latency_ms":0.011}
+{"ts_ms":2741,"event":"TASK_COMPLETE","task_id":"t05-note-upper-checksum","status":"success","steps":3,"repairs":1}
+{"ts_ms":2742,"event":"WORKFLOW_COMPLETE","task_id":"t05-note-upper-checksum","steps":3,"repairs":1}
+# agent-init: /usr/bin/agentd exited 0

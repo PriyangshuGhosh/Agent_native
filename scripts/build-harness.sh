@@ -2,7 +2,8 @@
 # Build the disposable Cycle 01 test VM into build/harness/{vmlinuz,initramfs,rootfs.qcow2}.
 # No root needed: apk runs in --usermode, fakeroot makes the ext4 image root-owned.
 # HARNESS_OUT / HARNESS_INIT / AGENT_INIT (a static agent-init binary) let scripts/build-rootfs-03.sh reuse this;
-# AGENTD / TIER1_LIB (scripts/build-rootfs-04.sh) add agentd and its Tier 1 test library.
+# AGENTD / TIER1_LIB (scripts/build-rootfs-04.sh) add agentd and its Tier 1 test library; PLAN_FIXTURE
+# (scripts/build-rootfs-05.sh) adds the recorded Gemini plan agentd replays.
 set -eu
 
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
@@ -40,6 +41,7 @@ fi
 if [ -n "${AGENTD:-}" ]; then
 	install -D -m 0755 "$AGENTD" "$R/usr/bin/agentd"
 	install -D -m 0644 "$TIER1_LIB" "$R/usr/lib/agentd/libtier1.so"
+	[ -z "${PLAN_FIXTURE:-}" ] || install -D -m 0644 "$PLAN_FIXTURE" "$R/usr/share/agentd/gemini_plan.json"
 fi
 
 cp "$R/boot/vmlinuz-virt" "$OUT/vmlinuz"
