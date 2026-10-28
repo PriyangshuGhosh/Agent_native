@@ -1,0 +1,7 @@
+[    0.000000] Linux version noise that the gate must ignore
+{"ts_ms":361,"event":"PID1_READY","pid":1,"comm":"agent-init","mounts":{"/proc":"proc","/sys":"sysfs","/dev":"devtmpfs","/dev/pts":"devpts","/run":"tmpfs","/tmp":"tmpfs"},"reap_test":{"pid":465,"reaped":true},"zombies":0,"user_procs":1}
+{"ts_ms": 2039, "event": "COMPOSITOR_READY", "output": "HEADLESS-1"}
+{"ts_ms": 2436, "event": "INTERACTION_CYCLE_VERIFIED", "primitive": "atspi_tree", "app": "mousepad", "nodes": 331}
+{"ts_ms": 2442, "event": "INTERACTION_CYCLE_VERIFIED", "primitive": "atspi_action", "expected": "gate01-atspi", "actual": "gate01-atspi"}
+{"ts_ms": 2740, "event": "INTERACTION_CYCLE_VERIFIED", "primitive": "uinput", "expected": "gate01-uinput", "actual": "gate01-uinput"}
+{"ts_ms": 2980, "event": "INTERACTION_CYCLE_VERIFIED", "primitive": "screencopy", "frames": 15, "fps": 62.5}

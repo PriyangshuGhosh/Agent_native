@@ -1,12 +1,13 @@
 /* agent-init: PID 1 of CUA-AgentOS. Deterministic: no network, no LLM, no inference.
- * Mounts the VFS, reaps every child, proves reaping works, reports PID1_READY on ttyS0, then waits.
- * SIGTERM/SIGINT (Ctrl-Alt-Del) or the agent.test_poweroff cmdline flag -> sync + RB_POWER_OFF. */
+ * Mounts the VFS, reaps every child, proves reaping works, reports PID1_READY on ttyS0, then starts and
+ * supervises the session services in order. The probe exiting, SIGTERM/SIGINT (Ctrl-Alt-Del) or the
+ * agent.test_poweroff cmdline flag -> SIGTERM everyone, sync, RB_POWER_OFF. */
 #define _GNU_SOURCE
 #include <dirent.h>
-#include <errno.h>
 #include <fcntl.h>
 #include <signal.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <sys/mount.h>
 #include <sys/reboot.h>
@@ -15,19 +16,133 @@
 #include <time.h>
 #include <unistd.h>
 
-static volatile sig_atomic_t reaped, last_reaped, stop;
+#define RUNTIME "/run/user/0"
+
+enum { SERVICE, ONESHOT, FINAL }; /* SERVICE is restarted on exit; ONESHOT runs to completion; FINAL's exit powers off */
+
+static struct svc {
+	const char *argv[6];
+	const char *ready; /* exists once the service is usable; started services wait for it */
+	int kind, restarts;
+	pid_t pid;
+} svcs[] = {
+	{ { "/etc/agent-init/prep", NULL }, NULL, ONESHOT, 0, 0 },
+	{ { "/usr/bin/dbus-daemon", "--session", "--nofork", "--nopidfile", "--address=unix:path=" RUNTIME "/bus", NULL },
+	  RUNTIME "/bus", SERVICE, 0, 0 },
+	{ { "/usr/libexec/at-spi-bus-launcher", "--launch-immediately", NULL }, NULL, SERVICE, 0, 0 },
+	{ { "/usr/bin/cage", "--", "mousepad", NULL }, RUNTIME "/wayland-0", SERVICE, 0, 0 },
+	{ { "/usr/local/bin/run-primitives.py", NULL }, NULL, FINAL, 0, 0 },
+};
+#define NSVC (sizeof(svcs) / sizeof(svcs[0]))
+
+static char *session_env[] = {
+	"PATH=/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin", "HOME=/root", "LANG=C.UTF-8",
+	"XDG_RUNTIME_DIR=" RUNTIME, "WAYLAND_DISPLAY=wayland-0", "DBUS_SESSION_BUS_ADDRESS=unix:path=" RUNTIME "/bus",
+	/* cage: headless output plus libinput so uinput devices reach it; no seat manager, no GPU */
+	"WLR_BACKENDS=headless,libinput", "LIBSEAT_BACKEND=noop", "WLR_RENDERER=pixman", "WLR_LIBINPUT_NO_DEVICES=1",
+	"GDK_BACKEND=wayland",
+};
+
+static volatile sig_atomic_t got_chld, stop;
+static int reaped, tty = -1, logfd = -1, nullfd = -1;
+static pid_t last_reaped;
 
 static void on_sigchld(int sig)
 {
-	int saved = errno, st;
+	(void)sig;
+	got_chld = 1;
+}
+
+static void spawn(struct svc *s)
+{
+	sigset_t none;
+
+	s->pid = fork();
+	if (s->pid == 0) {
+		sigemptyset(&none);
+		sigprocmask(SIG_SETMASK, &none, NULL);
+		setsid();
+		dup2(nullfd, 0);
+		dup2(logfd, 1);
+		dup2(logfd, 2);
+		execv(s->argv[0], (char *const *)s->argv);
+		_exit(127);
+	}
+	if (s->pid < 0)
+		s->pid = 0;
+}
+
+/* Reaps every exited child (orphans included). Returns 1 once the FINAL service has exited. */
+static int reap(void)
+{
+	int st, done = 0;
+	size_t i;
 	pid_t p;
 
-	(void)sig;
+	got_chld = 0;
 	while ((p = waitpid(-1, &st, WNOHANG)) > 0) {
 		reaped++;
 		last_reaped = p;
+		for (i = 0; i < NSVC; i++) {
+			if (svcs[i].pid != p)
+				continue;
+			svcs[i].pid = 0;
+			if (svcs[i].kind == FINAL)
+				done = 1;
+			else if (svcs[i].kind == SERVICE && !stop && svcs[i].restarts++ < 3) {
+				dprintf(tty, "# agent-init: restarting %s\n", svcs[i].argv[0]); /* non-JSON: gates ignore it */
+				spawn(&svcs[i]);
+			}
+		}
 	}
-	errno = saved;
+	return done;
+}
+
+/* Polls up to 10 s for a ONESHOT to finish or a ready path to appear; on timeout boot goes on and the probe reports. */
+static void wait_ready(const struct svc *s)
+{
+	struct timespec tick = { 0, 10000000 };
+	int i;
+
+	for (i = 0; i < 1000 && !stop; i++) {
+		reap();
+		if (s->kind == ONESHOT ? s->pid == 0 : !s->ready || access(s->ready, F_OK) == 0)
+			return;
+		nanosleep(&tick, NULL);
+	}
+}
+
+static void start_services(void)
+{
+	size_t i;
+
+	mkdir("/run/user", 0755);
+	mkdir(RUNTIME, 0700);
+	mkdir("/run/dbus", 0755);
+	for (i = 0; i < sizeof(session_env) / sizeof(session_env[0]); i++)
+		putenv(session_env[i]);
+	nullfd = open("/dev/null", O_RDWR | O_CLOEXEC);
+	logfd = open("/tmp/harness.log", O_WRONLY | O_CREAT | O_APPEND | O_CLOEXEC, 0644);
+	for (i = 0; i < NSVC && !stop; i++) {
+		spawn(&svcs[i]);
+		wait_ready(&svcs[i]);
+	}
+}
+
+/* SIGTERM everyone, give them 2 s, SIGKILL the rest, reap all, then power off. */
+static void shutdown_all(void)
+{
+	struct timespec tick = { 0, 10000000 };
+	int i;
+
+	kill(-1, SIGTERM);
+	for (i = 0; i < 200 && waitpid(-1, NULL, WNOHANG) >= 0; i++)
+		nanosleep(&tick, NULL);
+	kill(-1, SIGKILL);
+	while (waitpid(-1, NULL, 0) > 0)
+		;
+	sync();
+	reboot(RB_POWER_OFF);
 }
 
 static void on_stop(int sig)
@@ -126,22 +241,20 @@ static void scan_procs(int *zombies, int *user)
 	closedir(dir);
 }
 
-/* Forks a child that exits at once; true if the SIGCHLD handler reaped it and no /proc entry remains. */
-static int reap_test(pid_t *child)
+/* Forks a child that exits at once; true if SIGCHLD-driven reaping collected it and no /proc entry remains.
+ * Caller has SIGCHLD blocked; sigsuspend opens it atomically, so the wakeup cannot be lost. */
+static int reap_test(pid_t *child, const sigset_t *open_mask)
 {
-	sigset_t chld, old;
-	sig_atomic_t before = reaped;
+	int before = reaped;
 	char path[32];
 
-	sigemptyset(&chld);
-	sigaddset(&chld, SIGCHLD);
-	sigprocmask(SIG_BLOCK, &chld, &old);
 	*child = fork();
 	if (*child == 0)
 		_exit(0);
-	while (*child > 0 && reaped == before)
-		sigsuspend(&old);
-	sigprocmask(SIG_SETMASK, &old, NULL);
+	while (*child > 0 && reaped == before) {
+		sigsuspend(open_mask);
+		reap();
+	}
 	snprintf(path, sizeof(path), "/proc/%d", (int)*child);
 	return *child > 0 && last_reaped == *child && access(path, F_OK) != 0;
 }
@@ -162,7 +275,7 @@ int main(void)
 	struct sigaction sa;
 	sigset_t mask, empty;
 	char comm[32], cmdline[1024], mounts[512], line[1024];
-	int tty, zombies, user, ok, n;
+	int zombies, user, ok, n;
 	pid_t child;
 
 	if (getpid() != 1)
@@ -178,6 +291,13 @@ int main(void)
 	sa.sa_handler = on_stop;
 	sigaction(SIGTERM, &sa, NULL);
 	sigaction(SIGINT, &sa, NULL);
+	/* Signals are only taken inside sigsuspend, so the main loop never misses one between checks. */
+	sigemptyset(&mask);
+	sigaddset(&mask, SIGCHLD);
+	sigaddset(&mask, SIGTERM);
+	sigaddset(&mask, SIGINT);
+	sigprocmask(SIG_BLOCK, &mask, NULL);
+	sigemptyset(&empty);
 
 	mount_vfs();
 	tty = open("/dev/ttyS0", O_WRONLY | O_NOCTTY | O_CLOEXEC);
@@ -186,7 +306,7 @@ int main(void)
 		/* no other channel to report on */
 	}
 
-	ok = reap_test(&child);
+	ok = reap_test(&child, &empty);
 	scan_procs(&zombies, &user);
 	read_trim("/proc/1/comm", comm, sizeof(comm));
 	read_trim("/proc/cmdline", cmdline, sizeof(cmdline));
@@ -202,17 +322,13 @@ int main(void)
 
 	if (strstr(cmdline, "agent.test_poweroff"))
 		stop = 1;
+	else
+		start_services();
 
-	sigemptyset(&mask);
-	sigaddset(&mask, SIGTERM);
-	sigaddset(&mask, SIGINT);
-	sigprocmask(SIG_BLOCK, &mask, NULL);
-	sigemptyset(&empty);
-	while (!stop)
-		sigsuspend(&empty); /* SIGCHLD reaping keeps running in here */
+	while (!stop && !reap())
+		sigsuspend(&empty);
 
-	sync();
-	reboot(RB_POWER_OFF);
+	shutdown_all();
 	for (;;) /* PID 1 must never return */
 		pause();
 }

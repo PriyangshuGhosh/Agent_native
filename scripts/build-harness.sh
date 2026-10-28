@@ -1,10 +1,12 @@
 #!/bin/sh
 # Build the disposable Cycle 01 test VM into build/harness/{vmlinuz,initramfs,rootfs.qcow2}.
 # No root needed: apk runs in --usermode, fakeroot makes the ext4 image root-owned.
+# HARNESS_OUT / HARNESS_INIT / AGENT_INIT (a static agent-init binary) let scripts/build-rootfs-03.sh reuse this.
 set -eu
 
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
-OUT=$ROOT/build/harness
+OUT=${HARNESS_OUT:-$ROOT/build/harness}
+INIT=${HARNESS_INIT:-/sbin/harness-init}
 W=$OUT/work
 R=$W/root
 ALPINE=${ALPINE_MIRROR:-https://dl-cdn.alpinelinux.org/alpine}/v3.24
@@ -30,6 +32,10 @@ for p in $("$R/bin/busybox.static" --list-full); do
 done
 install -m 0755 "$ROOT/rootfs/harness/harness-init" "$R/sbin/harness-init"
 install -D -m 0755 "$ROOT/rootfs/harness/run-primitives.py" "$R/usr/local/bin/run-primitives.py"
+if [ -n "${AGENT_INIT:-}" ]; then
+	install -D -m 0755 "$AGENT_INIT" "$R/usr/bin/agent-init"
+	install -D -m 0755 "$ROOT/rootfs/agent-init/prep" "$R/etc/agent-init/prep"
+fi
 
 cp "$R/boot/vmlinuz-virt" "$OUT/vmlinuz"
 
@@ -59,6 +65,7 @@ while [ ! -b /dev/vda ]; do /bin/busybox usleep 10000; done
 /bin/busybox mount --move /dev /newroot/dev
 exec /bin/busybox switch_root /newroot /sbin/harness-init
 INIT
+sed -i "s|/sbin/harness-init|$INIT|" "$I/init"
 chmod 0755 "$I/init"
 (cd "$I" && find . | cpio -o -H newc -R 0:0 --quiet | gzip -9) >"$OUT/initramfs"
 

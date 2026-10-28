@@ -1,0 +1,12 @@
+#!/bin/sh
+# agent-init ONESHOT, run before the session services (same steps rootfs/harness/harness-init did in Cycle 01).
+mkdir -p /dev/shm
+mount -t tmpfs shm /dev/shm
+modprobe uinput
+# Post-install hooks were skipped at build time (apk --no-scripts); the image is -snapshot, so redo per boot.
+glib-compile-schemas /usr/share/glib-2.0/schemas
+gdk-pixbuf-query-loaders --update-cache
+update-mime-database /usr/share/mime
+udevd --daemon
+udevadm trigger --action=add
+udevadm settle

@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
-"""Cycle 01 guest probe: exercises each primitive and reports JSON lines on ttyS0 (contract: tests/gate-01.sh)."""
+"""Guest probe: exercises each primitive and reports JSON lines on ttyS0 (contract: tests/gate-01.sh, gate-03.sh).
+Standalone (Cycle 01) it starts D-Bus, AT-SPI and cage itself; under agent-init (Cycle 03+) those already run."""
 import json, os, subprocess, sys, time, traceback
 
 TTY = open("/dev/ttyS0", "w", buffering=1)
 LOG = open("/tmp/harness.log", "a", buffering=1)
 OUTPUT = "HEADLESS-1"
+MANAGED = "WAYLAND_DISPLAY" in os.environ  # agent-init exports it before starting the session
 
 
 def emit(event, **kw):
@@ -30,6 +32,8 @@ def wait_for(what, fn, timeout=30.0):
 
 
 def start_session():
+    if MANAGED:
+        return
     run = "/run/user/0"
     os.makedirs(run, mode=0o700, exist_ok=True)
     os.environ.update(XDG_RUNTIME_DIR=run, HOME="/root", LANG="C.UTF-8")
@@ -50,8 +54,9 @@ def make_keyboard():
 def start_cage():
     env = dict(os.environ, WLR_BACKENDS="headless,libinput", LIBSEAT_BACKEND="noop",
                WLR_RENDERER="pixman", WLR_LIBINPUT_NO_DEVICES="1", GDK_BACKEND="wayland")
-    subprocess.Popen(["cage", "--", "mousepad"], env=env, stdout=LOG, stderr=LOG)
-    os.environ["WAYLAND_DISPLAY"] = "wayland-0"
+    if not MANAGED:
+        subprocess.Popen(["cage", "--", "mousepad"], env=env, stdout=LOG, stderr=LOG)
+        os.environ["WAYLAND_DISPLAY"] = "wayland-0"
     # grim -o fails unless an output with exactly this name exists.
     wait_for("cage output " + OUTPUT, lambda: subprocess.run(
         ["grim", "-t", "ppm", "-o", OUTPUT, "/tmp/probe.ppm"], stdout=LOG, stderr=LOG).returncode == 0)
@@ -109,15 +114,31 @@ def atspi_steps(kbd):
     emit("INTERACTION_CYCLE_VERIFIED", primitive="atspi_action", expected=want, actual=settle(want))
 
     from evdev import ecodes as e
-    Atspi.EditableText.set_text_contents(text, "")
-    wait_for("text cleared", lambda: read() == "", 5)
-    want = "gate01-uinput"
-    for ch in want:
-        key = e.KEY_MINUS if ch == "-" else getattr(e, "KEY_" + ch.upper())
+
+    def press(key):
         for val in (1, 0):
             kbd.write(e.EV_KEY, key, val)
             kbd.syn()
             time.sleep(0.01)
+
+    def clear():
+        Atspi.EditableText.set_text_contents(text, "")
+        wait_for("text cleared", lambda: read() == "", 5)
+        return True
+
+    # Under agent-init the keyboard is hotplugged into a running cage: probe until libinput delivers keys.
+    def keys_live():
+        clear()
+        press(e.KEY_X)
+        end = time.monotonic() + 0.5
+        while time.monotonic() < end and read() == "":
+            time.sleep(0.05)
+        return read() != "" and clear()
+
+    wait_for("uinput keyboard live", keys_live, 15)
+    want = "gate01-uinput"
+    for ch in want:
+        press(e.KEY_MINUS if ch == "-" else getattr(e, "KEY_" + ch.upper()))
     emit("INTERACTION_CYCLE_VERIFIED", primitive="uinput", expected=want, actual=settle(want))
 
 
