@@ -1,0 +1,3 @@
+{"name": "corrupt-cap", "version": "1.0.0", "injected_fault": "payload truncated: bin/corrupt-cap is not executable",
+ "files": [{"src": "bin/corrupt-cap", "dst": "/usr/local/bin/corrupt-cap"}],
+ "verify": {"argv": ["/usr/local/bin/corrupt-cap", "--selftest"], "stdout": "corrupt-cap ok\n"}}

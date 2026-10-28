@@ -1,0 +1,3 @@
+{"name": "test-cap", "version": "1.0.0",
+ "files": [{"src": "bin/test-cap", "dst": "/usr/local/bin/test-cap"}],
+ "verify": {"argv": ["/usr/local/bin/test-cap", "--selftest"], "stdout": "test-cap ok\n"}}

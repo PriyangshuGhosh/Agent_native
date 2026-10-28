@@ -3,7 +3,9 @@
 # No root needed: apk runs in --usermode, fakeroot makes the ext4 image root-owned.
 # HARNESS_OUT / HARNESS_INIT / AGENT_INIT (a static agent-init binary) let scripts/build-rootfs-03.sh reuse this;
 # AGENTD / TIER1_LIB (scripts/build-rootfs-04.sh) add agentd and its Tier 1 test library; PLAN_FIXTURE
-# (scripts/build-rootfs-05.sh) adds the recorded Gemini plan agentd replays.
+# (scripts/build-rootfs-05.sh) adds the recorded Gemini plan agentd replays; BASE_FS=squashfs / PACKAGES_DIR
+# (scripts/build-rootfs-06.sh) ship the root as a read-only SquashFS under a tmpfs-backed OverlayFS, plus the
+# capability packages agentd installs.
 set -eu
 
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
@@ -43,16 +45,25 @@ if [ -n "${AGENTD:-}" ]; then
 	install -D -m 0644 "$TIER1_LIB" "$R/usr/lib/agentd/libtier1.so"
 	[ -z "${PLAN_FIXTURE:-}" ] || install -D -m 0644 "$PLAN_FIXTURE" "$R/usr/share/agentd/gemini_plan.json"
 fi
+if [ -n "${PACKAGES_DIR:-}" ]; then
+	P=$R/usr/share/agentd/packages
+	mkdir -p "$P"
+	cp "$PACKAGES_DIR/queue" "$P/queue"
+	for d in "$PACKAGES_DIR"/*/; do
+		tar -C "$d" --sort=name --owner=0 --group=0 --numeric-owner --mtime=@0 -cf "$P/$(basename "$d").tar" .
+	done
+fi
 
 cp "$R/boot/vmlinuz-virt" "$OUT/vmlinuz"
 
-# Tiny initramfs: static busybox loads virtio_blk/ext4, mounts /dev/vda, switch_roots to harness-init.
+# Tiny initramfs: static busybox loads the block/fs modules, mounts /dev/vda, switch_roots to harness-init.
 M=$R/lib/modules/$(ls "$R/lib/modules")
 I=$W/initramfs
 mkdir -p "$I/bin" "$I/dev" "$I/proc" "$I/newroot" "$I/lib"
 cp "$R/bin/busybox.static" "$I/bin/busybox"
 # Resolve deps from modules.dep, deps first; stored uncompressed so busybox insmod can load them.
-awk -F': *' -v want="virtio_blk ext4" '
+if [ "${BASE_FS:-}" = squashfs ]; then MODS="virtio_blk squashfs overlay"; else MODS="virtio_blk ext4"; fi
+awk -F': *' -v want="$MODS" '
 	{ dep[$1] = $2; n = $1; sub(/.*\//, "", n); sub(/\.ko.*/, "", n); path[n] = $1 }
 	function load(f,   a, i, k) { if (f in seen) return; seen[f]; k = split(dep[f], a, " "); for (i = k; i >= 1; i--) load(a[i]); print f }
 	END { k = split(want, w, " "); for (i = 1; i <= k; i++) load(path[w[i]]) }' "$M/modules.dep" |
@@ -67,16 +78,35 @@ cat >"$I/init" <<'INIT'
 /bin/busybox mount -t devtmpfs dev /dev
 for m in $(/bin/busybox cat /modlist); do /bin/busybox insmod /lib/$m; done
 while [ ! -b /dev/vda ]; do /bin/busybox usleep 10000; done
-/bin/busybox mount -t ext4 /dev/vda /newroot || { echo "initramfs: mount /dev/vda failed"; /bin/busybox poweroff -f; }
+MOUNT_ROOT
 /bin/busybox umount /proc
 /bin/busybox mount --move /dev /newroot/dev
 exec /bin/busybox switch_root /newroot /sbin/harness-init
 INIT
-sed -i "s|/sbin/harness-init|$INIT|" "$I/init"
+if [ "${BASE_FS:-}" = squashfs ]; then
+	# Read-only SquashFS lower + tmpfs upper/work -> OverlayFS root; both layers stay visible under /mnt.
+	cat >"$W/mount-root" <<'MOUNT'
+/bin/busybox mkdir -p /lower /rw
+/bin/busybox mount -t squashfs -o ro /dev/vda /lower || { echo "initramfs: mount squashfs failed"; /bin/busybox poweroff -f; }
+/bin/busybox mount -t tmpfs -o mode=0755 rw /rw
+/bin/busybox mkdir /rw/upper /rw/work
+/bin/busybox mount -t overlay overlay -o lowerdir=/lower,upperdir=/rw/upper,workdir=/rw/work /newroot || { echo "initramfs: mount overlay failed"; /bin/busybox poweroff -f; }
+/bin/busybox mount --move /lower /newroot/mnt/base
+/bin/busybox mount --move /rw /newroot/mnt/rw
+MOUNT
+	mkdir -p "$R/mnt/base" "$R/mnt/rw" "$R/data"
+else
+	echo '/bin/busybox mount -t ext4 /dev/vda /newroot || { echo "initramfs: mount /dev/vda failed"; /bin/busybox poweroff -f; }' >"$W/mount-root"
+fi
+sed -i -e "/^MOUNT_ROOT\$/{r $W/mount-root" -e 'd}' -e "s|/sbin/harness-init|$INIT|" "$I/init"
 chmod 0755 "$I/init"
 (cd "$I" && find . | cpio -o -H newc -R 0:0 --quiet | gzip -9) >"$OUT/initramfs"
 
-fakeroot /usr/sbin/mke2fs -q -t ext4 -L harness -d "$R" "$W/rootfs.img" 2G
-qemu-img convert -O qcow2 "$W/rootfs.img" "$OUT/rootfs.qcow2"
+if [ "${BASE_FS:-}" = squashfs ]; then
+	mksquashfs "$R" "$OUT/rootfs.squashfs" -comp zstd -all-root -noappend -quiet -no-progress
+else
+	fakeroot /usr/sbin/mke2fs -q -t ext4 -L harness -d "$R" "$W/rootfs.img" 2G
+	qemu-img convert -O qcow2 "$W/rootfs.img" "$OUT/rootfs.qcow2"
+fi
 rm -rf "$W"
 echo "harness: built $OUT"

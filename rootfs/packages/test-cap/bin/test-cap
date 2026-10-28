@@ -1,0 +1,3 @@
+#!/bin/sh
+# test-cap: a capability agentd installs at runtime; --selftest is its post-install check.
+[ "$1" = --selftest ] && echo "test-cap ok"

@@ -1,9 +1,10 @@
 /* agent-init: PID 1 of CUA-AgentOS. Deterministic: no network, no LLM, no inference.
- * Mounts the VFS, reaps every child, proves reaping works, reports PID1_READY on ttyS0, then starts and
+ * Mounts the VFS, reaps every child, proves reaping works, reports PID1_READY and STORAGE_READY on ttyS0, then starts and
  * supervises the session services in order. The final workload (agentd; FINAL_CMD) exiting, SIGTERM/SIGINT (Ctrl-Alt-Del) or the
  * agent.test_poweroff cmdline flag -> SIGTERM everyone, sync, RB_POWER_OFF. */
 #define _GNU_SOURCE
 #include <dirent.h>
+#include <errno.h>
 #include <fcntl.h>
 #include <signal.h>
 #include <stdio.h>
@@ -211,6 +212,38 @@ static int mounts_json(char *buf, size_t len)
 	return n;
 }
 
+/* The initramfs leaves the SquashFS base at /mnt/base and the tmpfs upper/work at /mnt/rw, under an overlay root.
+ * base_ro needs the kernel to list the base ro AND a write into it to fail with EROFS. */
+static int storage_json(char *buf, size_t len)
+{
+	char src[256], dir[256], type[32], opts[256], root[32] = "", base[32] = "", upper[32] = "";
+	int base_ro = 0, fd;
+	FILE *f = fopen("/proc/self/mounts", "r");
+
+	if (f) {
+		while (fscanf(f, "%255s %255s %31s %255s %*[^\n]", src, dir, type, opts) == 4) {
+			if (!strcmp(dir, "/"))
+				snprintf(root, sizeof(root), "%s", type);
+			else if (!strcmp(dir, "/mnt/base")) {
+				snprintf(base, sizeof(base), "%s", type);
+				base_ro = !strncmp(opts, "ro", 2) && (opts[2] == ',' || !opts[2]);
+			}
+			else if (!strcmp(dir, "/mnt/rw"))
+				snprintf(upper, sizeof(upper), "%s", type);
+		}
+		fclose(f);
+	}
+	fd = open("/mnt/base/.agent-init-probe", O_WRONLY | O_CREAT | O_CLOEXEC, 0600);
+	base_ro = base_ro && fd < 0 && errno == EROFS && !strcmp(base, "squashfs");
+	if (fd >= 0)
+		close(fd);
+	return snprintf(buf, len,
+			"{\"ts_ms\":%ld,\"event\":\"STORAGE_READY\",\"base_ro\":%s,\"overlay\":%s,"
+			"\"root\":\"%s\",\"base\":\"%s\",\"upper\":\"%s\"}\n",
+			now_ms(), base_ro ? "true" : "false", !strcmp(root, "overlay") && !strcmp(upper, "tmpfs") ? "true" : "false",
+			root, base, upper);
+}
+
 /* Counts zombies and userspace processes (kernel threads have an empty cmdline). */
 static void scan_procs(int *zombies, int *user)
 {
@@ -321,6 +354,10 @@ int main(void)
 		     "{\"ts_ms\":%ld,\"event\":\"PID1_READY\",\"pid\":%d,\"comm\":\"%s\",\"mounts\":%s,"
 		     "\"reap_test\":{\"pid\":%d,\"reaped\":%s},\"zombies\":%d,\"user_procs\":%d}\n",
 		     now_ms(), (int)getpid(), comm, mounts, (int)child, ok ? "true" : "false", zombies, user);
+	if (tty >= 0 && n > 0 && write(tty, line, (size_t)n < sizeof(line) ? (size_t)n : sizeof(line) - 1) < 0) {
+		/* no other channel to report on */
+	}
+	n = storage_json(line, sizeof(line));
 	if (tty >= 0 && n > 0 && write(tty, line, (size_t)n < sizeof(line) ? (size_t)n : sizeof(line) - 1) < 0) {
 		/* no other channel to report on */
 	}

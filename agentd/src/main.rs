@@ -1,13 +1,16 @@
 //! agentd: the CUA-AgentOS agent runtime, run by agent-init as its final workload.
 //! Cycle 04: waits for the session, proves each capability tier once (contract: tests/gate-04.sh).
 //! Cycle 05: if a recorded plan is bundled, runs it through the cognitive loop (contract: tests/gate-05.sh).
+//! Cycle 06: if capability packages are bundled, installs each into the overlay transactionally, runs and
+//! verifies it, and rolls back any that fails (contract: tests/gate-06.sh).
 //! Reports JSON lines on ttyS0 and exits; agent-init powers off when it does.
 use serde_json::{Value, json};
 use std::collections::{HashMap, VecDeque};
 use std::ffi::OsStr;
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Write};
-use std::path::Path;
+use std::os::unix::fs::PermissionsExt;
+use std::path::{Component, Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::thread::sleep;
 use std::time::{Duration, Instant};
@@ -318,6 +321,184 @@ fn workflow(tty: &mut File) -> Res<bool> {
     Ok(ok)
 }
 
+const PACKAGES: &str = "/usr/share/agentd/packages";
+const REGISTRY: &str = "/data/registry.json";
+/// Overlay layers as the initramfs leaves them (see scripts/build-harness.sh).
+const UPPER: &str = "/mnt/rw/upper";
+const BASE: &str = "/mnt/base";
+const LIFECYCLE_TASK: &str = "t06-lifecycle";
+const STEP_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Every path a transaction touched, with its (bytes, mode) before it (None = it did not exist).
+type Journal = Vec<(PathBuf, Option<(Vec<u8>, u32)>)>;
+
+/// Atomically replaces `path` (temp file + rename in the same directory).
+fn put(path: &Path, data: &[u8], mode: u32) -> Res<()> {
+    let tmp = path.with_extension("agentd-tmp");
+    let r = (|| -> Res<()> {
+        fs::create_dir_all(path.parent().ok_or("path has no parent")?)?;
+        fs::write(&tmp, data)?;
+        fs::set_permissions(&tmp, fs::Permissions::from_mode(mode))?;
+        Ok(fs::rename(&tmp, path)?)
+    })();
+    if r.is_err() {
+        let _ = fs::remove_file(&tmp);
+    }
+    r
+}
+
+fn snapshot(path: &Path) -> Option<(Vec<u8>, u32)> {
+    Some((fs::read(path).ok()?, fs::metadata(path).ok()?.permissions().mode() & 0o7777))
+}
+
+/// Journals `path`'s prior state, then writes it.
+fn staged_put(j: &mut Journal, path: &Path, data: &[u8], mode: u32) -> Res<()> {
+    j.push((path.into(), snapshot(path)));
+    put(path, data, mode)
+}
+
+/// Undoes a transaction, newest change first.
+fn rollback(j: &Journal) -> Res<()> {
+    for (p, prior) in j.iter().rev() {
+        match prior {
+            Some((b, m)) => put(p, b, *m)?,
+            None => fs::remove_file(p).or_else(|e| if e.kind() == std::io::ErrorKind::NotFound { Ok(()) } else { Err(e) })?,
+        }
+    }
+    Ok(())
+}
+
+/// `p` as seen in another overlay layer.
+fn in_layer(layer: &str, p: &Path) -> PathBuf {
+    Path::new(layer).join(p.strip_prefix("/").unwrap_or(p))
+}
+
+/// Install targets: plain absolute paths under the capability dirs, never into the base system's own paths.
+fn dst_allowed(p: &Path) -> bool {
+    p.parent().is_some_and(|d| d.starts_with("/usr/local/bin") || d.starts_with("/opt"))
+        && p.components().all(|c| matches!(c, Component::RootDir | Component::Normal(_)))
+}
+
+/// Runs argv with the per-step timeout (SIGKILL on expiry); returns stdout of a successful run.
+fn run_capped(argv: &[&str]) -> Res<String> {
+    let mut child = Command::new(argv.first().ok_or("empty argv")?).args(&argv[1..])
+        .stdin(Stdio::null()).stdout(Stdio::piped()).spawn()?;
+    let end = Instant::now() + STEP_TIMEOUT;
+    let st = loop {
+        if let Some(st) = child.try_wait()? {
+            break st;
+        }
+        if Instant::now() > end {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(format!("{} timed out after {}s", argv[0], STEP_TIMEOUT.as_secs()).into());
+        }
+        sleep(Duration::from_millis(5));
+    };
+    let mut out = String::new();
+    child.stdout.take().ok_or("no stdout")?.read_to_string(&mut out)?;
+    if !st.success() {
+        return Err(format!("{} exited {st}", argv[0]).into());
+    }
+    Ok(out)
+}
+
+/// Install -> run -> verify for one package; on any failure, roll the transaction back and check it left no trace.
+/// Returns whether the outcome is the expected one (verified, or cleanly rolled back if the fault was injected).
+fn lifecycle_package(tty: &mut File, name: &str) -> Res<bool> {
+    if name.is_empty() || !name.chars().all(|c| c.is_ascii_alphanumeric() || c == '-') {
+        return Err(format!("bad package name {name:?}").into());
+    }
+    let pkg = || ("package", json!(name));
+    let stage = Path::new("/tmp/agentd-stage").join(name);
+    let _ = fs::remove_dir_all(&stage);
+    fs::create_dir_all(&stage)?;
+    let tar = format!("{PACKAGES}/{name}.tar");
+    run_capped(&["/bin/tar", "-xf", &tar, "-C", stage.to_str().ok_or("stage path")?])?;
+    let m: Value = serde_json::from_slice(&fs::read(stage.join("manifest.json"))?)?;
+    let fault = m["injected_fault"].as_str();
+    if let Some(f) = fault {
+        emit(tty, "LIFECYCLE_FAIL_INJECTED", &[pkg(), ("fault", json!(f))]);
+    }
+
+    let (mut j, mut files) = (Journal::new(), vec![]);
+    let t = Instant::now();
+    let r = (|| -> Res<String> {
+        for f in m["files"].as_array().ok_or("manifest has no files")? {
+            let src = Path::new(f["src"].as_str().ok_or("file has no src")?);
+            let dst = Path::new(f["dst"].as_str().ok_or("file has no dst")?);
+            if !src.components().all(|c| matches!(c, Component::Normal(_))) || !dst_allowed(dst) {
+                return Err(format!("{} -> {} escapes the package or capability dirs", src.display(), dst.display()).into());
+            }
+            staged_put(&mut j, dst, &fs::read(stage.join(src))?, 0o755)?;
+            files.push(dst.to_path_buf());
+        }
+        let mut reg: Value = fs::read(REGISTRY).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or(json!({}));
+        reg[name] = json!({"version": m["version"], "files": files, "status": "installed"});
+        staged_put(&mut j, Path::new(REGISTRY), &serde_json::to_vec_pretty(&reg)?, 0o644)?;
+        emit(tty, "LIFECYCLE_INSTALL", &[("task_id", json!(LIFECYCLE_TASK)), pkg(), ("version", m["version"].clone()),
+                                         ("files", json!(files)), ("journal", json!(j.len()))]);
+        emit(tty, "CAPABILITY_INSTALLED", &[pkg(), ("version", m["version"].clone())]);
+        let argv: Vec<&str> = m["verify"]["argv"].as_array().ok_or("manifest has no verify.argv")?.iter().filter_map(Value::as_str).collect();
+        let out = run_capped(&argv).map_err(|e| format!("execute: {e}"))?;
+        if out != m["verify"]["stdout"].as_str().unwrap_or_default() {
+            return Err(format!("verify: stdout {out:?}, expected {}", m["verify"]["stdout"]).into());
+        }
+        Ok(out)
+    })();
+    let _ = fs::remove_dir_all(&stage);
+    match r {
+        Ok(out) => {
+            let in_upper = files.iter().all(|f| in_layer(UPPER, f).exists());
+            let in_base = files.iter().any(|f| in_layer(BASE, f).exists());
+            emit(tty, "LIFECYCLE_VERIFIED", &[pkg(), ("status", json!("ok")), ("stdout", json!(out)), ("in_upper", json!(in_upper)),
+                                              ("in_base", json!(in_base)), ("latency_ms", json!(ms(t)))]);
+            Ok(fault.is_none() && in_upper && !in_base)
+        }
+        Err(reason) => {
+            let reason = reason.to_string();
+            emit(tty, "LIFECYCLE_VERIFIED", &[pkg(), ("status", json!("fail")), ("error", json!(reason))]);
+            emit(tty, "ROLLBACK_TRIGGERED", &[pkg(), ("reason", json!(reason)), ("journal", json!(j.len()))]);
+            emit(tty, "CAPABILITY_ROLLBACK", &[pkg(), ("reason", json!(reason))]);
+            let undone = rollback(&j);
+            // Clean = every touched path is back to its prior bytes and mode, new files left nothing (not even a
+            // whiteout) in the upper layer, the base never held them, and the registry does not list the package.
+            let restored = j.iter().all(|(p, prior)| snapshot(p) == *prior);
+            let upper_clean = j.iter().all(|(p, prior)| prior.is_some() || !in_layer(UPPER, p).exists());
+            let base_clean = j.iter().all(|(p, prior)| prior.is_some() || !in_layer(BASE, p).exists());
+            let reg: Value = fs::read(REGISTRY).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or(json!({}));
+            let clean = undone.is_ok() && restored && upper_clean && base_clean && reg.get(name).is_none();
+            let mut f = vec![pkg(), ("clean", json!(clean)), ("restored", json!(restored)), ("upper_clean", json!(upper_clean)),
+                             ("base_clean", json!(base_clean)), ("journal", json!(j.len()))];
+            if let Err(e) = undone {
+                f.push(("error", json!(e.to_string())));
+            }
+            emit(tty, "ROLLBACK_VERIFIED", &f);
+            Ok(fault.is_some() && clean)
+        }
+    }
+}
+
+/// Runs every queued package through the lifecycle as one task.
+fn lifecycle(tty: &mut File) -> Res<bool> {
+    let queue = fs::read_to_string(format!("{PACKAGES}/queue"))?;
+    let names: Vec<&str> = queue.lines().map(str::trim).filter(|l| !l.is_empty()).collect();
+    let tid = || ("task_id", json!(LIFECYCLE_TASK));
+    emit(tty, "TASK_START", &[tid(), ("intent", json!("Install, run and verify each queued capability; roll back any that fails")),
+                               ("packages", json!(names)), ("source", json!("local"))]);
+    let mut ok = true;
+    for n in &names {
+        ok &= lifecycle_package(tty, n).unwrap_or_else(|e| {
+            emit(tty, "LIFECYCLE_VERIFIED", &[("package", json!(n)), ("status", json!("fail")), ("error", json!(e.to_string()))]);
+            false
+        });
+    }
+    let reg: Value = fs::read(REGISTRY).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or(json!({}));
+    let installed: Vec<&String> = reg.as_object().map(|o| o.keys().collect()).unwrap_or_default();
+    emit(tty, "TASK_COMPLETE", &[tid(), ("status", json!(if ok { "success" } else { "fail" })), ("registry", json!(installed))]);
+    Ok(ok)
+}
+
 fn ms(t: Instant) -> f64 {
     (t.elapsed().as_secs_f64() * 1e6).round() / 1e3
 }
@@ -364,6 +545,12 @@ fn main() {
             false
         });
     }
+    if Path::new(PACKAGES).exists() {
+        ok_all &= lifecycle(&mut tty).unwrap_or_else(|e| {
+            emit(&mut tty, "TASK_COMPLETE", &[("task_id", json!(LIFECYCLE_TASK)), ("status", json!("fail")), ("error", json!(e.to_string()))]);
+            false
+        });
+    }
     std::process::exit(if ok_all { 0 } else { 1 });
 }
 
@@ -386,5 +573,23 @@ mod tests {
         assert_eq!(param(&fix[0], "text", &outs).unwrap(), "hello agentos");
         assert_eq!(param(&plan[1], "stdin", &outs).unwrap(), "hi");
         assert!(param(&plan[2], "input", &outs).is_err(), "unverified step reference must fail");
+    }
+
+    #[test]
+    fn rollback_restores_prior_state_and_dst_is_confined() {
+        let d = std::env::temp_dir().join(format!("agentd-test-{}", std::process::id()));
+        let (old, new) = (d.join("reg.json"), d.join("bin/cap"));
+        put(&old, b"before", 0o644).unwrap();
+        let mut j = Journal::new();
+        staged_put(&mut j, &new, b"payload", 0o755).unwrap();
+        staged_put(&mut j, &old, b"after", 0o600).unwrap();
+        rollback(&j).unwrap();
+        assert!(!new.exists());
+        assert_eq!(snapshot(&old), Some((b"before".to_vec(), 0o644)));
+        fs::remove_dir_all(&d).unwrap();
+        assert!(dst_allowed(Path::new("/usr/local/bin/x")) && dst_allowed(Path::new("/opt/x/y")));
+        for bad in ["/usr/local/bin", "/usr/local/bin/../../bin/sh", "/usr/bin/x", "/opt", "usr/local/bin/x"] {
+            assert!(!dst_allowed(Path::new(bad)), "{bad}");
+        }
     }
 }
