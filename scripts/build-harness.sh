@@ -116,6 +116,12 @@ fi
 sed -i -e "s|DEV|${DEV:-}|; s|SQUASH|${SQUASH:-}|" "$I/init" "$W/mount-root"
 sed -i -e "/^MOUNT_ROOT\$/{r $W/mount-root" -e 'd}' -e "s|/sbin/harness-init|$INIT|" "$I/init"
 chmod 0755 "$I/init"
+# ISO: the kernel runs agent-init straight from the initramfs (rdinit=/usr/bin/agent-init); it execs /stage1 (this
+# script) to mount the real root, which switch_roots back to agent-init there.
+if [ "${BASE_FS:-}" = iso ]; then
+	install -D -m 0755 "$AGENT_INIT" "$I/usr/bin/agent-init"
+	cp "$I/init" "$I/stage1"  # busybox switch_root insists /init is a regular file
+fi
 (cd "$I" && find . -exec touch -h -d "@$EPOCH" {} + && find . | LC_ALL=C sort |
 	cpio -o -H newc -R 0:0 --reproducible --quiet | gzip -9n) >"$OUT/initramfs"
 

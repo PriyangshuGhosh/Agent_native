@@ -32,7 +32,7 @@ TIMEOUT 0
 LABEL agentos
   KERNEL /boot/vmlinuz
   INITRD /boot/initramfs
-  APPEND console=ttyS0 quiet loglevel=0 panic=0
+  APPEND rdinit=/usr/bin/agent-init console=ttyS0 quiet loglevel=0 panic=0
 CFG
 	cp "$D/$run/vmlinuz" "$D/$run/initramfs" "$S/boot/"
 	cp "$D/$run/rootfs.squashfs" "$S/"

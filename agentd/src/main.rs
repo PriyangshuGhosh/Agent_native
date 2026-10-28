@@ -3,6 +3,7 @@
 //! Cycle 05: if a recorded plan is bundled, runs it through the cognitive loop (contract: tests/gate-05.sh).
 //! Cycle 06: if capability packages are bundled, installs each into the overlay transactionally, runs and
 //! verifies it, and rolls back any that fails (contract: tests/gate-06.sh).
+//! Cycle 08: also measures Tier 3 screencopy FPS (contract: tests/gate-08.sh).
 //! Reports JSON lines on ttyS0 and exits; agent-init powers off when it does.
 use serde_json::{Value, json};
 use std::collections::{HashMap, VecDeque};
@@ -141,6 +142,24 @@ fn tier3() -> Res<Proof> {
     let t = Instant::now();
     let got = set_text(&a11y, &text, want)?;
     Ok((json!(want), json!(got), ms(t)))
+}
+
+/// Tier 3 pixel fallback: grabs frames of the headless output over wlr-screencopy (grim); returns (frames, fps).
+fn screencopy() -> Res<(u32, f64)> {
+    let frames = 15;
+    let t = Instant::now();
+    for _ in 0..frames {
+        let st = Command::new("/usr/bin/grim").args(["-t", "ppm", "-o", "HEADLESS-1", "/tmp/frame.ppm"]).stderr(Stdio::null()).status()?;
+        if !st.success() {
+            return Err(format!("grim: {st}").into());
+        }
+        let mut magic = [0u8; 2];
+        File::open("/tmp/frame.ppm")?.read_exact(&mut magic)?;
+        if &magic != b"P6" {
+            return Err("grim wrote a non-PPM frame".into());
+        }
+    }
+    Ok((frames, (f64::from(frames) / t.elapsed().as_secs_f64() * 10.0).round() / 10.0))
 }
 
 /// SetTextContents, then the widget's text as read back.
@@ -539,6 +558,17 @@ fn main() {
         };
         ok_all &= ok;
     }
+    ok_all &= match screencopy() {
+        Ok((frames, fps)) => {
+            emit(&mut tty, "INTERACTION_CYCLE_VERIFIED", &[("primitive", json!("screencopy")), ("status", json!(if fps >= 10.0 { "ok" } else { "fail" })),
+                                                            ("frames", json!(frames)), ("fps", json!(fps)), ("budget_fps", json!(10.0))]);
+            fps >= 10.0
+        }
+        Err(e) => {
+            emit(&mut tty, "INTERACTION_CYCLE_VERIFIED", &[("primitive", json!("screencopy")), ("status", json!("fail")), ("error", json!(e.to_string()))]);
+            false
+        }
+    };
     if Path::new(PLAN).exists() {
         ok_all &= workflow(&mut tty).unwrap_or_else(|e| {
             emit(&mut tty, "TASK_COMPLETE", &[("status", json!("fail")), ("error", json!(e.to_string()))]);

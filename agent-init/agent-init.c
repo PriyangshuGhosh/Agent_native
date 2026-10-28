@@ -312,12 +312,16 @@ int main(void)
 {
 	struct sigaction sa;
 	sigset_t mask, empty;
-	char comm[32], cmdline[1024], mounts[512], line[1024];
+	char comm[32], cmdline[512], mounts[512], line[1536], *p;
 	int zombies, user, ok, n;
 	pid_t child;
 
 	if (getpid() != 1)
 		return 1;
+	/* ISO boot: the kernel hands off to us in the initramfs (rdinit=); /stage1 mounts the real root and
+	 * switch_roots back into /usr/bin/agent-init there, still as PID 1. The real root has no /stage1. */
+	if (access("/stage1", X_OK) == 0)
+		execl("/stage1", "/stage1", (char *)NULL);
 	reboot(RB_DISABLE_CAD); /* Ctrl-Alt-Del becomes SIGINT to us */
 
 	memset(&sa, 0, sizeof(sa));
@@ -348,12 +352,15 @@ int main(void)
 	scan_procs(&zombies, &user);
 	read_trim("/proc/1/comm", comm, sizeof(comm));
 	read_trim("/proc/cmdline", cmdline, sizeof(cmdline));
+	for (p = cmdline; *p; p++) /* keep it a valid JSON string */
+		if (*p == '"' || *p == '\\' || (unsigned char)*p < 0x20)
+			*p = '?';
 	mounts_json(mounts, sizeof(mounts));
 
 	n = snprintf(line, sizeof(line),
 		     "{\"ts_ms\":%ld,\"event\":\"PID1_READY\",\"pid\":%d,\"comm\":\"%s\",\"mounts\":%s,"
-		     "\"reap_test\":{\"pid\":%d,\"reaped\":%s},\"zombies\":%d,\"user_procs\":%d}\n",
-		     now_ms(), (int)getpid(), comm, mounts, (int)child, ok ? "true" : "false", zombies, user);
+		     "\"reap_test\":{\"pid\":%d,\"reaped\":%s},\"zombies\":%d,\"user_procs\":%d,\"cmdline\":\"%s\"}\n",
+		     now_ms(), (int)getpid(), comm, mounts, (int)child, ok ? "true" : "false", zombies, user, cmdline);
 	if (tty >= 0 && n > 0 && write(tty, line, (size_t)n < sizeof(line) ? (size_t)n : sizeof(line) - 1) < 0) {
 		/* no other channel to report on */
 	}
