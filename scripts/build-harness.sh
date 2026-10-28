@@ -1,7 +1,8 @@
 #!/bin/sh
 # Build the disposable Cycle 01 test VM into build/harness/{vmlinuz,initramfs,rootfs.qcow2}.
 # No root needed: apk runs in --usermode, fakeroot makes the ext4 image root-owned.
-# HARNESS_OUT / HARNESS_INIT / AGENT_INIT (a static agent-init binary) let scripts/build-rootfs-03.sh reuse this.
+# HARNESS_OUT / HARNESS_INIT / AGENT_INIT (a static agent-init binary) let scripts/build-rootfs-03.sh reuse this;
+# AGENTD / TIER1_LIB (scripts/build-rootfs-04.sh) add agentd and its Tier 1 test library.
 set -eu
 
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
@@ -12,7 +13,7 @@ R=$W/root
 ALPINE=${ALPINE_MIRROR:-https://dl-cdn.alpinelinux.org/alpine}/v3.24
 APK_TOOLS=apk-tools-static-3.0.8-r0.apk
 PKGS="alpine-baselayout busybox busybox-static kmod linux-virt eudev dbus at-spi2-core cage mousepad
-	python3 py3-dbus py3-gobject3 py3-evdev grim font-dejavu adwaita-icon-theme librsvg shared-mime-info"
+	libgcc python3 py3-dbus py3-gobject3 py3-evdev grim font-dejavu adwaita-icon-theme librsvg shared-mime-info"
 
 rm -rf "$W" && mkdir -p "$R" "$W/initramfs"
 cd "$W"
@@ -35,6 +36,10 @@ install -D -m 0755 "$ROOT/rootfs/harness/run-primitives.py" "$R/usr/local/bin/ru
 if [ -n "${AGENT_INIT:-}" ]; then
 	install -D -m 0755 "$AGENT_INIT" "$R/usr/bin/agent-init"
 	install -D -m 0755 "$ROOT/rootfs/agent-init/prep" "$R/etc/agent-init/prep"
+fi
+if [ -n "${AGENTD:-}" ]; then
+	install -D -m 0755 "$AGENTD" "$R/usr/bin/agentd"
+	install -D -m 0644 "$TIER1_LIB" "$R/usr/lib/agentd/libtier1.so"
 fi
 
 cp "$R/boot/vmlinuz-virt" "$OUT/vmlinuz"

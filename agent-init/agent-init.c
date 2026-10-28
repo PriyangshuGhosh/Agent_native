@@ -1,6 +1,6 @@
 /* agent-init: PID 1 of CUA-AgentOS. Deterministic: no network, no LLM, no inference.
  * Mounts the VFS, reaps every child, proves reaping works, reports PID1_READY on ttyS0, then starts and
- * supervises the session services in order. The probe exiting, SIGTERM/SIGINT (Ctrl-Alt-Del) or the
+ * supervises the session services in order. The final workload (agentd; FINAL_CMD) exiting, SIGTERM/SIGINT (Ctrl-Alt-Del) or the
  * agent.test_poweroff cmdline flag -> SIGTERM everyone, sync, RB_POWER_OFF. */
 #define _GNU_SOURCE
 #include <dirent.h>
@@ -17,6 +17,9 @@
 #include <unistd.h>
 
 #define RUNTIME "/run/user/0"
+#ifndef FINAL_CMD /* build-rootfs-03.sh overrides it with the Cycle 01 probe */
+#define FINAL_CMD "/usr/bin/agentd"
+#endif
 
 enum { SERVICE, ONESHOT, FINAL }; /* SERVICE is restarted on exit; ONESHOT runs to completion; FINAL's exit powers off */
 
@@ -31,7 +34,7 @@ static struct svc {
 	  RUNTIME "/bus", SERVICE, 0, 0 },
 	{ { "/usr/libexec/at-spi-bus-launcher", "--launch-immediately", NULL }, NULL, SERVICE, 0, 0 },
 	{ { "/usr/bin/cage", "--", "mousepad", NULL }, RUNTIME "/wayland-0", SERVICE, 0, 0 },
-	{ { "/usr/local/bin/run-primitives.py", NULL }, NULL, FINAL, 0, 0 },
+	{ { FINAL_CMD, NULL }, NULL, FINAL, 0, 0 },
 };
 #define NSVC (sizeof(svcs) / sizeof(svcs[0]))
 
@@ -87,8 +90,10 @@ static int reap(void)
 			if (svcs[i].pid != p)
 				continue;
 			svcs[i].pid = 0;
-			if (svcs[i].kind == FINAL)
+			if (svcs[i].kind == FINAL) {
+				dprintf(tty, "# agent-init: %s exited %d\n", svcs[i].argv[0], WIFEXITED(st) ? WEXITSTATUS(st) : -1);
 				done = 1;
+			}
 			else if (svcs[i].kind == SERVICE && !stop && svcs[i].restarts++ < 3) {
 				dprintf(tty, "# agent-init: restarting %s\n", svcs[i].argv[0]); /* non-JSON: gates ignore it */
 				spawn(&svcs[i]);
