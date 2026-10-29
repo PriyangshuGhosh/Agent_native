@@ -6,11 +6,15 @@
 //! Cycle 08: also measures Tier 3 screencopy FPS (contract: tests/gate-08.sh).
 //! Every child runs in its own process group under the 30 s step cap; SIGUSR1 is the emergency stop.
 //! Reports JSON lines on ttyS0 and exits; agent-init powers off when it does.
+//! Debian: `agentd serve` is a systemd service (agentd/debian/agentd.service) planning each request live with
+//! Gemini; `agentd ask <request>` sends one request and prints its telemetry (contract: tests/test-debian-vm.sh).
 use serde_json::{Map, Value, json};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::fs::{self, File, OpenOptions};
-use std::io::{Read, Write};
+use std::io::{BufRead, BufReader, Read, Write};
+use std::os::fd::AsFd;
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+use std::os::unix::net::{UnixListener, UnixStream};
 use std::os::unix::process::CommandExt;
 use std::path::{Component, Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -36,7 +40,7 @@ fn now_ms() -> i64 {
     ts.tv_sec * 1000 + ts.tv_nsec / 1_000_000
 }
 
-fn emit(tty: &mut File, event: &str, fields: &[(&str, Value)]) {
+fn emit(tty: &mut dyn Write, event: &str, fields: &[(&str, Value)]) {
     let mut s = format!(r#"{{"ts_ms":{},"event":"{event}""#, now_ms());
     for (k, v) in fields {
         s += &format!(",\"{k}\":{v}");
@@ -236,6 +240,10 @@ fn parse_response(r: &Value) -> Res<(String, Vec<Directive>)> {
         }
         Ok(d)
     }).collect::<Res<Vec<_>>>()?;
+    if ds.is_empty() {
+        // An empty plan would "succeed" with nothing done.
+        return Err(format!("planner declined: {}", body["unsupported"].as_str().unwrap_or("no directives")).into());
+    }
     Ok((task, ds))
 }
 
@@ -353,16 +361,22 @@ fn run_step(d: &Directive, ui: &mut Option<(String, Connection, Node)>, outs: &H
     Ok((out, lat))
 }
 
-/// Cognitive loop over recorded Gemini responses: [0] is the plan, each replan consumes the next one,
-/// whose directives replace the failed step. Returns task success.
-fn workflow(tty: &mut File) -> Res<bool> {
+/// Replays the recorded Gemini responses: [0] is the plan, each replan consumes the next one.
+fn replay(tty: &mut dyn Write) -> Res<bool> {
     let fx: Value = serde_json::from_slice(&fs::read(PLAN)?)?;
-    let mut responses = fx["responses"].as_array().ok_or("fixture has no responses")?.iter();
-    let (task, plan) = parse_response(responses.next().ok_or("fixture has no plan")?)?;
+    let mut responses = fx["responses"].as_array().ok_or("fixture has no responses")?.iter().cloned();
+    workflow(tty, &fx["intent"], &fx["model"], "recorded", |_| responses.next().map(Ok))
+}
+
+/// Cognitive loop: `next(None)` gives the plan, `next(Some(reason))` a replan whose directives replace the failed
+/// step (None = no more responses). Returns task success.
+fn workflow(tty: &mut dyn Write, intent: &Value, model: &Value, source: &str,
+            mut next: impl FnMut(Option<&str>) -> Option<Res<Value>>) -> Res<bool> {
+    let (task, plan) = parse_response(&next(None).ok_or("planner gave no plan")??)?;
     let mut plan = VecDeque::from(plan);
     let tid = || ("task_id", json!(task));
-    emit(tty, "TASK_START", &[tid(), ("intent", fx["intent"].clone()), ("model", fx["model"].clone()),
-                               ("steps", json!(plan.len())), ("source", json!("recorded"))]);
+    emit(tty, "TASK_START", &[tid(), ("intent", intent.clone()), ("model", model.clone()),
+                               ("steps", json!(plan.len())), ("source", json!(source))]);
     let (mut outs, mut ui, mut repairs, mut err) = (HashMap::new(), None, 0, None);
     while let Some(d) = plan.pop_front() {
         match run_step(&d, &mut ui, &outs) {
@@ -384,7 +398,7 @@ fn workflow(tty: &mut File) -> Res<bool> {
                 }
                 emit(tty, "REPLAN_TRIGGERED", &[tid(), ("step", json!(d.step)), ("tier", json!(d.tier)), ("reason", json!(reason)),
                                                 ("attempt", json!(repairs)), ("budget", json!(REPAIR_BUDGET))]);
-                match responses.next().map(parse_response) {
+                match next(Some(&reason)).map(|r| r.and_then(|v| parse_response(&v))) {
                     Some(Ok((t, ds))) if t == task => ds.into_iter().rev().for_each(|x| plan.push_front(x)),
                     r => {
                         err = Some(format!("no usable replan: {}", r.map_or("none recorded".into(), |r| r.err().map_or("task_id mismatch".into(), |e| e.to_string()))));
@@ -739,8 +753,142 @@ fn ms(t: Instant) -> f64 {
     (t.elapsed().as_secs_f64() * 1e6).round() / 1e3
 }
 
+const SOCK: &str = "/run/agentd/agentd.sock";
+const GEMINI_URL: &str = "https://generativelanguage.googleapis.com/v1beta/models";
+/// gemini-2.5-flash is closed to new API keys. AGENTD_MODEL overrides: a comma-separated list, tried in order.
+const MODEL_DEFAULT: &str = "gemini-3.8-flash,gemini-3.6-flash,gemini-3-flash-preview";
+/// The planner contract. The model only proposes: parse_response/check_directive decide what runs.
+const PLANNER_PROMPT: &str = r#"You plan tasks for agentd, the agent of an OS. Reply with JSON only:
+{"task_id": "<short-kebab-id>", "directives": [<directive>, ...]}
+The only action available on this system is:
+{"task_id": "<same id>", "step": <1, 2, ...>, "tier": 2, "action": "pipe", "target": "/usr/bin/tr",
+ "params": {"args": [<tr arguments, strings>], "stdin": "<text>" or "$N" for step N's output},
+ "validation": {"expected_role": null, "precondition_state": {"path_exists": "/usr/bin/tr"},
+                "expected_postcondition": {"output": "<exact expected stdout>"}}}
+The postcondition is checked byte for byte against the real output, so predict it exactly.
+If the request cannot be done with this action, reply {"task_id": "unsupported", "unsupported": "<why>", "directives": []}."#;
+const MAX_REQUEST: u64 = 4096;
+
+/// Safe inside a quoted curl config value: no quote, backslash, space or newline can break out of it.
+fn config_safe(s: &str) -> bool {
+    !s.is_empty() && s.bytes().all(|b| b.is_ascii_alphanumeric() || b"._-".contains(&b))
+}
+
+/// One generateContent call via curl, a capped child like any other (step cap, emergency stop). The key goes in
+/// curl's config on stdin, never in argv or a file. At most two rounds over the models.
+fn gemini(key: &str, models: &str, contents: &Value) -> Res<Value> {
+    let req = json!({"systemInstruction": {"parts": [{"text": PLANNER_PROMPT}]}, "contents": contents,
+                     "generationConfig": {"responseMimeType": "application/json"}});
+    let body = Path::new("/run/agentd/request.json");
+    put(body, &serde_json::to_vec(&req)?, 0o600)?;
+    let mut last = String::new();
+    for round in 0..2 {
+        if round > 0 {
+            sleep(Duration::from_secs(2));
+        }
+        for model in models.split(',') {
+            let cfg = format!("url = \"{GEMINI_URL}/{model}:generateContent\"\nheader = \"x-goog-api-key: {key}\"\n\
+                header = \"Content-Type: application/json\"\ndata-binary = \"@{}\"\nmax-time = 25\nsilent\nshow-error\n", body.display());
+            match run_capped(&["/usr/bin/curl", "-K", "-"], &cfg).and_then(|o| Ok(serde_json::from_str::<Value>(&o)?)) {
+                Ok(r) if r.get("error").is_none() => return Ok(r),
+                Ok(r) => last = format!("{model}: HTTP {}: {}", r["error"]["code"], r["error"]["message"].as_str().unwrap_or_default()),
+                Err(e) => last = format!("{model}: {e}"),
+            }
+        }
+    }
+    Err(format!("planner unavailable: {last}").into())
+}
+
+/// Telemetry to the journal and to the requesting client; a client that hangs up does not stop the task.
+struct Tee<'a>(&'a mut File, &'a mut UnixStream);
+
+impl Write for Tee<'_> {
+    fn write(&mut self, b: &[u8]) -> std::io::Result<usize> {
+        let _ = self.1.write_all(b);
+        self.0.write_all(b)?;
+        Ok(b.len())
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.0.flush()
+    }
+}
+
+/// Service mode: one request per connection on SOCK, one task at a time, planned live. A planner or task failure
+/// fails that task only; the daemon keeps serving.
+fn serve() -> Res<()> {
+    let mut log = File::from(std::io::stdout().as_fd().try_clone_to_owned()?); // journald under systemd
+    let model = std::env::var("AGENTD_MODEL").unwrap_or_else(|_| MODEL_DEFAULT.into());
+    if !model.split(',').all(config_safe) {
+        return Err(format!("bad AGENTD_MODEL {model:?}").into());
+    }
+    let key = std::env::var("GEMINI_API_KEY").ok().filter(|k| config_safe(k));
+    let _ = fs::remove_file(SOCK);
+    let listener = UnixListener::bind(SOCK)?;
+    fs::set_permissions(SOCK, fs::Permissions::from_mode(0o600))?;
+    emit(&mut log, "AGENTD_READY", &[("pid", json!(std::process::id())), ("socket", json!(SOCK)), ("model", json!(model)),
+                                     ("planner", json!(if key.is_some() { "live" } else { "unavailable" }))]);
+    for conn in listener.incoming() {
+        let Ok(mut c) = conn else { continue };
+        let _ = c.set_read_timeout(Some(Duration::from_secs(5)));
+        let mut intent = String::new();
+        let _ = BufReader::new((&c).take(MAX_REQUEST)).read_line(&mut intent);
+        let intent = intent.trim().to_string();
+        let mut out = Tee(&mut log, &mut c);
+        let r = match &key {
+            _ if intent.is_empty() => Err("empty request".into()),
+            None => Err("planner unavailable: no valid GEMINI_API_KEY (set it in /etc/agentd/gemini.env)".into()),
+            Some(k) => {
+                let mut contents = vec![json!({"role": "user", "parts": [{"text": intent}]})];
+                workflow(&mut out, &json!(intent), &json!(model), "live", |reason| {
+                    if let Some(r) = reason {
+                        contents.push(json!({"role": "user", "parts": [{"text": format!(
+                            "That step failed: {r}. Reply with directives that replace only the failed step (same task_id and step).")}]}));
+                    }
+                    let r = gemini(k, &model, &json!(contents));
+                    if let Ok(v) = &r {
+                        contents.push(v["candidates"][0]["content"].clone());
+                    }
+                    Some(r)
+                })
+            }
+        };
+        if let Err(e) = r {
+            emit(&mut out, "TASK_COMPLETE", &[("status", json!("fail")), ("error", json!(e.to_string()))]);
+        }
+    }
+    Ok(())
+}
+
+/// Sends one request to the service and prints its telemetry. Returns whether the task succeeded.
+fn ask(req: &str) -> Res<bool> {
+    let mut c = wait_for("agentd socket", 5, || UnixStream::connect(SOCK).ok())?;
+    writeln!(c, "{}", req.replace('\n', " "))?;
+    let mut ok = false;
+    for line in BufReader::new(c).lines() {
+        let line = line?;
+        println!("{line}");
+        if let Ok(v) = serde_json::from_str::<Value>(&line) && v["event"] == "TASK_COMPLETE" {
+            ok = v["status"] == "success";
+        }
+    }
+    Ok(ok)
+}
+
 fn main() {
     unsafe { libc::signal(libc::SIGUSR1, on_sigusr1 as *const () as libc::sighandler_t) };
+    let args: Vec<String> = std::env::args().collect();
+    match args.get(1).map(String::as_str) {
+        Some("serve") => {
+            let e = serve().err().map_or("listener closed".into(), |e| e.to_string());
+            eprintln!("agentd: {e}");
+            std::process::exit(1);
+        }
+        Some("ask") => std::process::exit(match ask(&args[2..].join(" ")) {
+            Ok(ok) => if ok { 0 } else { 1 },
+            Err(e) => { eprintln!("agentd: {e}"); 2 }
+        }),
+        _ => {}
+    }
     let dev = std::env::var("AGENT_TTY").unwrap_or_else(|_| "/dev/ttyS0".into()); // set by agent-init's kernel cmdline
     let mut tty = OpenOptions::new().append(true).open(&dev).expect("open telemetry tty");
     let session = [format!("{RUNTIME}/bus"), format!("{RUNTIME}/wayland-0")];
@@ -789,7 +937,7 @@ fn main() {
         }
     };
     if Path::new(PLAN).exists() {
-        ok_all &= workflow(&mut tty).unwrap_or_else(|e| {
+        ok_all &= replay(&mut tty).unwrap_or_else(|e| {
             emit(&mut tty, "TASK_COMPLETE", &[("status", json!("fail")), ("error", json!(e.to_string()))]);
             false
         });
@@ -862,6 +1010,17 @@ mod tests {
             "params": {"symbol": "tier1_fib", "input": "a"}, "validation": {"expected_postcondition": {"output": 1}}}]);
         assert!(parse_response(&plan(ffi_sym)).is_err(), "non-allow-listed symbol must be rejected");
         assert!(ffi("/run/agentd/../../tmp/evil.so", "tier1_fnv1a", "").is_err(), "runtime check must hold too");
+        let declined = json!({"candidates": [{"content": {"parts": [{"text":
+            r#"{"task_id": "unsupported", "unsupported": "no such action", "directives": []}"#}]}}]});
+        assert!(parse_response(&declined).err().unwrap().to_string().contains("no such action"), "an empty plan is never a success");
+    }
+
+    #[test]
+    fn curl_config_values_cannot_break_out() {
+        assert!(config_safe("AQ.Ab8-x_y") && config_safe("gemini-3.8-flash"));
+        for bad in ["", "a\"\nurl = \"http://evil", "a b", "a\\", "k\nheader"] {
+            assert!(!config_safe(bad), "{bad:?}");
+        }
     }
 
     #[test]

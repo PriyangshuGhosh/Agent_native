@@ -110,3 +110,21 @@ All gates were rerun from a clean rebuild.
 Needs `gcc-aarch64-linux-gnu qemu-user-static mtools` (rootless copies: `. build/cross/env.sh`). Telemetry goes to
 `AGENT_TTY` (kernel cmdline env, default `/dev/ttyS0`; the Pi writes `agentos.log` on its FAT partition, no serial cable).
 The image ran on a real Pi 5 (all checks pass except AGENTD_READY 4.1 s > 3 s). Progress and next steps: `docs/pi5-2026-10-29.md`.
+
+## Debian base direction (2026-10-29, branch `debian-base`)
+Product direction is now `CUA-AgentOS_goal.md`: a general-purpose distro (amd64 + arm64, Pi 5 first among the ARM boards),
+built as **Debian 13 (trixie) + our packages**. The work is reused, not reinvented. The Alpine/agent-init cycles above
+stay as a record, and their gates must keep passing. On Debian: systemd is PID 1, and agent-init and the ≤1000 ms boot
+budgets do not apply. amd64 is tested only in a throwaway KVM guest (`-snapshot`); hardware tests happen on the Pi 5.
+- **Model:** `gemini-2.5-flash` is closed to new API keys, so live calls use `AGENTD_MODEL` (default
+  `gemini-3.8-flash,gemini-3.6-flash,gemini-3-flash-preview`, tried in order). The Alpine gates still replay the
+  recorded 2.5-flash fixture.
+- **Step 1 (done):** `scripts/build-deb.sh` builds `build/deb/agentd_<ver>_amd64.deb`: `agentd serve` as `agentd.service`
+  (DynamicUser, ProtectSystem=strict, Restart=on-failure with StartLimitBurst=5/60 s), with a control socket at
+  `/run/agentd/agentd.sock` (0600) and `agentd ask <request>` as the client. The key goes in `/etc/agentd/gemini.env`
+  (`GEMINI_API_KEY=...`, optional; without it, tasks fail with "planner unavailable" and the service stays up). It reaches
+  curl only through its stdin config. Planner actions on Debian: Tier 2 `tr` only (`/run` is noexec, so Tier 1 cannot
+  dlopen there, and there is no GUI for Tier 3). Test: `scripts/fetch-debian-cloud.sh`, then `tests/test-debian-vm.sh`
+  (9 checks, including a live Gemini plan → execute → verify; about 1 min).
+- **Next:** step 2, a text prompt that works without the model; step 3, an mkosi config that builds both the amd64 image
+  and the Pi 5 SD image.
