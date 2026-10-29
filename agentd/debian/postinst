@@ -1,7 +1,12 @@
 #!/bin/sh
 set -e
+if [ "$1" = configure ]; then
+	getent group agentd-users >/dev/null || groupadd --system agentd-users
+fi
 if [ "$1" = configure ] && [ -d /run/systemd/system ]; then
 	systemctl daemon-reload
-	systemctl enable agentd.service
-	systemctl restart agentd.service
+	systemctl enable agentd.socket agentd.service agentd-console.service
+	systemctl disable getty@tty1.service 2>/dev/null || true
+	systemctl start agentd.socket
+	systemctl restart agentd.service agentd-console.service
 fi

@@ -1,5 +1,7 @@
 #!/bin/sh
 set -e
 if [ -d /run/systemd/system ]; then
-	systemctl disable --now agentd.service || true
+	systemctl disable --now agentd-console.service agentd.service agentd.socket || true
+	# Give tty1 back to the login prompt.
+	systemctl enable --now getty@tty1.service || true
 fi

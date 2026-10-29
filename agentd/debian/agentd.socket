@@ -1,0 +1,11 @@
+[Unit]
+Description=CUA-AgentOS agent request socket
+
+[Socket]
+ListenStream=/run/agentd.sock
+# Root and the console (group agentd-users, created by postinst) may submit requests; nobody else.
+SocketMode=0660
+SocketGroup=agentd-users
+
+[Install]
+WantedBy=sockets.target

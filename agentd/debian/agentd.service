@@ -1,6 +1,7 @@
 [Unit]
 Description=CUA-AgentOS agent daemon
-After=network-online.target
+After=network-online.target agentd.socket
+Requires=agentd.socket
 Wants=network-online.target
 # A crash loop stops after 5 starts in 60 s; the OS stays up without the agent.
 StartLimitIntervalSec=60

@@ -117,14 +117,21 @@ built as **Debian 13 (trixie) + our packages**. The work is reused, not reinvent
 stay as a record, and their gates must keep passing. On Debian: systemd is PID 1, and agent-init and the ≤1000 ms boot
 budgets do not apply. amd64 is tested only in a throwaway KVM guest (`-snapshot`); hardware tests happen on the Pi 5.
 - **Model:** `gemini-2.5-flash` is closed to new API keys, so live calls use `AGENTD_MODEL` (default
-  `gemini-3.8-flash,gemini-3.6-flash,gemini-3-flash-preview`, tried in order). The Alpine gates still replay the
-  recorded 2.5-flash fixture.
+  `gemini-3.6-flash,gemini-3-flash-preview,gemini-3.8-flash`, tried in order; 3.8 timed out on every call when measured),
+  with Gemini `responseSchema` forcing the directive shape. The Alpine gates still replay the recorded 2.5-flash fixture.
 - **Step 1 (done):** `scripts/build-deb.sh` builds `build/deb/agentd_<ver>_amd64.deb`: `agentd serve` as `agentd.service`
-  (DynamicUser, ProtectSystem=strict, Restart=on-failure with StartLimitBurst=5/60 s), with a control socket at
-  `/run/agentd/agentd.sock` (0600) and `agentd ask <request>` as the client. The key goes in `/etc/agentd/gemini.env`
+  (DynamicUser, ProtectSystem=strict, Restart=on-failure with StartLimitBurst=5/60 s). Requests arrive through
+  `agentd.socket` (`/run/agentd.sock`, 0660, group `agentd-users`, socket-activated, so it survives agentd restarts);
+  `agentd ask <request>` is the root/admin client. The key goes in `/etc/agentd/gemini.env`
   (`GEMINI_API_KEY=...`, optional; without it, tasks fail with "planner unavailable" and the service stays up). It reaches
   curl only through its stdin config. Planner actions on Debian: Tier 2 `tr` only (`/run` is noexec, so Tier 1 cannot
   dlopen there, and there is no GUI for Tier 3). Test: `scripts/fetch-debian-cloud.sh`, then `tests/test-debian-vm.sh`
-  (9 checks, including a live Gemini plan → execute → verify; about 1 min).
-- **Next:** step 2, a text prompt that works without the model; step 3, an mkosi config that builds both the amd64 image
-  and the Pi 5 SD image.
+  (11 checks, including a live Gemini plan → execute → verify; about 1 min).
+- **Step 2 (done):** `agentd-console.service` runs `agentd console` on tty1 (it takes tty1 from getty; tty2 keeps a
+  normal login as the recovery route). It is an unprivileged client in group `agentd-users`. It prints each task in
+  plain words (plan, each verified step, repairs, outcome, and "Nothing was changed" when no plan ran). `status` and
+  `help` are answered locally, without the model: the console sends `/status` and agentd replies with the event
+  `AGENTD_STATUS` (planner, models, uptime, tasks), which was added for this step. No approval prompts yet, since there
+  are no high-risk actions. Tested by piping input through the console in the VM; tty1 has not yet been looked at on a
+  real screen.
+- **Next:** step 3, an mkosi config that builds both the amd64 image and the Pi 5 SD image (arm64 .deb).

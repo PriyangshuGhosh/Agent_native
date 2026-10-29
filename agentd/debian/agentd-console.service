@@ -1,0 +1,29 @@
+[Unit]
+Description=CUA-AgentOS text prompt on tty1
+After=agentd.service systemd-user-sessions.service
+# Takes tty1 from the login prompt; tty2 (Alt+F2) keeps a normal login as the recovery route.
+Conflicts=getty@tty1.service
+After=getty@tty1.service
+
+[Service]
+ExecStart=/usr/bin/agentd console
+StandardInput=tty
+StandardOutput=tty
+StandardError=journal
+TTYPath=/dev/tty1
+TTYReset=yes
+TTYVHangup=yes
+TTYVTDisallocate=yes
+Restart=always
+RestartSec=1
+# A client only: no root, no network, no writes; it reaches agentd through the socket (group agentd-users).
+DynamicUser=yes
+SupplementaryGroups=agentd-users
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+RestrictAddressFamilies=AF_UNIX
+
+[Install]
+WantedBy=multi-user.target

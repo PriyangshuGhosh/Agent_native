@@ -7,12 +7,13 @@
 //! Every child runs in its own process group under the 30 s step cap; SIGUSR1 is the emergency stop.
 //! Reports JSON lines on ttyS0 and exits; agent-init powers off when it does.
 //! Debian: `agentd serve` is a systemd service (agentd/debian/agentd.service) planning each request live with
-//! Gemini; `agentd ask <request>` sends one request and prints its telemetry (contract: tests/test-debian-vm.sh).
+//! Gemini; `agentd ask <request>` sends one request and prints its telemetry; `agentd console` is the plain-words
+//! prompt on tty1 (agentd/debian/agentd-console.service). Contract: tests/test-debian-vm.sh.
 use serde_json::{Map, Value, json};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::fs::{self, File, OpenOptions};
 use std::io::{BufRead, BufReader, Read, Write};
-use std::os::fd::AsFd;
+use std::os::fd::{AsFd, FromRawFd};
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::os::unix::process::CommandExt;
@@ -753,10 +754,13 @@ fn ms(t: Instant) -> f64 {
     (t.elapsed().as_secs_f64() * 1e6).round() / 1e3
 }
 
-const SOCK: &str = "/run/agentd/agentd.sock";
+/// Owned by agentd.socket (0660, group agentd-users; "agentd" is DynamicUser's own name). It outlives agentd
+/// restarts, so requests queue instead of failing.
+const SOCK: &str = "/run/agentd.sock";
 const GEMINI_URL: &str = "https://generativelanguage.googleapis.com/v1beta/models";
-/// gemini-2.5-flash is closed to new API keys. AGENTD_MODEL overrides: a comma-separated list, tried in order.
-const MODEL_DEFAULT: &str = "gemini-3.8-flash,gemini-3.6-flash,gemini-3-flash-preview";
+/// gemini-2.5-flash is closed to new API keys; 3.8 timed out on every call when measured (2026-10-29), so it goes last.
+/// AGENTD_MODEL overrides: a comma-separated list, tried in order.
+const MODEL_DEFAULT: &str = "gemini-3.6-flash,gemini-3-flash-preview,gemini-3.8-flash";
 /// The planner contract. The model only proposes: parse_response/check_directive decide what runs.
 const PLANNER_PROMPT: &str = r#"You plan tasks for agentd, the agent of an OS. Reply with JSON only:
 {"task_id": "<short-kebab-id>", "directives": [<directive>, ...]}
@@ -769,6 +773,20 @@ The postcondition is checked byte for byte against the real output, so predict i
 If the request cannot be done with this action, reply {"task_id": "unsupported", "unsupported": "<why>", "directives": []}."#;
 const MAX_REQUEST: u64 = 4096;
 
+/// Gemini's responseSchema for PLANNER_PROMPT, so replies come in the directive shape; check_directive still decides.
+fn planner_schema() -> Value {
+    let s = json!({"type": "STRING"});
+    let obj = |req: &[&str], props: Value| json!({"type": "OBJECT", "required": req, "properties": props});
+    let directive = obj(&["task_id", "step", "tier", "action", "target", "params", "validation"], json!({
+        "task_id": s, "step": {"type": "INTEGER"}, "tier": {"type": "INTEGER"}, "action": s, "target": s,
+        "params": obj(&["args", "stdin"], json!({"args": {"type": "ARRAY", "items": s}, "stdin": s})),
+        "validation": obj(&["expected_postcondition"], json!({
+            "expected_role": {"type": "STRING", "nullable": true},
+            "precondition_state": {"type": "OBJECT", "properties": {"path_exists": s}},
+            "expected_postcondition": obj(&["output"], json!({"output": s}))}))}));
+    obj(&["task_id", "directives"], json!({"task_id": s, "unsupported": s, "directives": {"type": "ARRAY", "items": directive}}))
+}
+
 /// Safe inside a quoted curl config value: no quote, backslash, space or newline can break out of it.
 fn config_safe(s: &str) -> bool {
     !s.is_empty() && s.bytes().all(|b| b.is_ascii_alphanumeric() || b"._-".contains(&b))
@@ -778,7 +796,7 @@ fn config_safe(s: &str) -> bool {
 /// curl's config on stdin, never in argv or a file. At most two rounds over the models.
 fn gemini(key: &str, models: &str, contents: &Value) -> Res<Value> {
     let req = json!({"systemInstruction": {"parts": [{"text": PLANNER_PROMPT}]}, "contents": contents,
-                     "generationConfig": {"responseMimeType": "application/json"}});
+                     "generationConfig": {"responseMimeType": "application/json", "responseSchema": planner_schema()}});
     let body = Path::new("/run/agentd/request.json");
     put(body, &serde_json::to_vec(&req)?, 0o600)?;
     let mut last = String::new();
@@ -792,7 +810,13 @@ fn gemini(key: &str, models: &str, contents: &Value) -> Res<Value> {
             match run_capped(&["/usr/bin/curl", "-K", "-"], &cfg).and_then(|o| Ok(serde_json::from_str::<Value>(&o)?)) {
                 Ok(r) if r.get("error").is_none() => return Ok(r),
                 Ok(r) => last = format!("{model}: HTTP {}: {}", r["error"]["code"], r["error"]["message"].as_str().unwrap_or_default()),
-                Err(e) => last = format!("{model}: {e}"),
+                // run_capped's error ends in curl's exit code; the network ones get plain words for the console.
+                Err(e) => last = format!("{model}: {}", match e.to_string().rsplit(' ').next() {
+                    Some("6") => "no network (cannot resolve the Gemini host)".into(),
+                    Some("7") => "no network (cannot connect to the Gemini host)".into(),
+                    Some("28") => "no answer within 25 s".into(),
+                    _ => e.to_string(),
+                }),
             }
         }
     }
@@ -822,9 +846,12 @@ fn serve() -> Res<()> {
         return Err(format!("bad AGENTD_MODEL {model:?}").into());
     }
     let key = std::env::var("GEMINI_API_KEY").ok().filter(|k| config_safe(k));
-    let _ = fs::remove_file(SOCK);
-    let listener = UnixListener::bind(SOCK)?;
-    fs::set_permissions(SOCK, fs::Permissions::from_mode(0o600))?;
+    // Socket activation: fd 3 is SOCK, passed by systemd (LISTEN_FDS/LISTEN_PID, sd_listen_fds(3)).
+    if std::env::var("LISTEN_FDS").as_deref() != Ok("1") || std::env::var("LISTEN_PID") != Ok(std::process::id().to_string()) {
+        return Err("no socket from systemd: start agentd.socket / agentd.service".into());
+    }
+    let listener = unsafe { UnixListener::from_raw_fd(3) };
+    let (start, mut tasks) = (Instant::now(), 0u64);
     emit(&mut log, "AGENTD_READY", &[("pid", json!(std::process::id())), ("socket", json!(SOCK)), ("model", json!(model)),
                                      ("planner", json!(if key.is_some() { "live" } else { "unavailable" }))]);
     for conn in listener.incoming() {
@@ -833,6 +860,16 @@ fn serve() -> Res<()> {
         let mut intent = String::new();
         let _ = BufReader::new((&c).take(MAX_REQUEST)).read_line(&mut intent);
         let intent = intent.trim().to_string();
+        // Local commands never reach the model, so they work offline.
+        if intent.starts_with('/') {
+            match intent.as_str() {
+                "/status" => emit(&mut c, "AGENTD_STATUS", &[("planner", json!(if key.is_some() { "live" } else { "unavailable" })),
+                    ("model", json!(model)), ("uptime_s", json!(start.elapsed().as_secs())), ("tasks", json!(tasks))]),
+                _ => emit(&mut c, "TASK_COMPLETE", &[("status", json!("fail")), ("error", json!(format!("unknown command {intent}")))]),
+            }
+            continue;
+        }
+        tasks += 1;
         let mut out = Tee(&mut log, &mut c);
         let r = match &key {
             _ if intent.is_empty() => Err("empty request".into()),
@@ -874,6 +911,71 @@ fn ask(req: &str) -> Res<bool> {
     Ok(ok)
 }
 
+/// One telemetry line in plain words for the console; None = not shown.
+fn describe(v: &Value) -> Option<String> {
+    let s = |k: &str| v[k].as_str().unwrap_or_default().to_string();
+    Some(match v["event"].as_str()? {
+        "TASK_START" => format!("Plan: {} step(s); each one is checked before it counts.", v["steps"]),
+        "STEP_VERIFIED" => format!("  ok  step {}: {} -> {} (verified)", v["step"], s("action"), v["output"]),
+        "REPLAN_TRIGGERED" => format!("  !!  step {} failed its check: {}\n      asking for a new plan (attempt {} of {})",
+                                      v["step"], s("reason"), v["attempt"], v["budget"]),
+        "TASK_COMPLETE" if v["status"] == "success" => match v["repairs"].as_u64().unwrap_or(0) {
+            0 => format!("Done: {} step(s) verified.", v["steps"]),
+            n => format!("Done: {} step(s) verified, after {n} repair(s).", v["steps"]),
+        },
+        "TASK_COMPLETE" => {
+            let e = s("error");
+            if let Some(why) = e.strip_prefix("planner unavailable: ") {
+                format!("I can't plan this right now: {why}\nNothing was changed. Local commands still work: status, help.")
+            } else if let Some(why) = e.strip_prefix("planner declined: ") {
+                format!("I can't do that on this system yet: {why}\nNothing was changed.")
+            } else {
+                format!("Not done: {e}\n{} step(s) had been verified before it stopped.", v["steps"].as_u64().unwrap_or(0))
+            }
+        }
+        "AGENTD_STATUS" => format!("Agent: running for {} s, {} task(s) handled.\nPlanner: {} (models: {}).",
+                                   v["uptime_s"], v["tasks"], s("planner"), s("model")),
+        _ => return None,
+    })
+}
+
+const HELP: &str = "Type what you want done, in plain words; for example: Upper-case the text: hello
+The agent plans it, checks every step and tells you what happened.
+  status   is the agent running, and can it plan right now?
+  help     this text
+Today the agent can only transform text; system tasks come next.";
+
+/// The tty1 prompt: a client of the socket like `ask`, with no privileges of its own. Returns at end of input.
+fn console() -> Res<()> {
+    println!("CUA-AgentOS\n{HELP}");
+    let mut input = std::io::stdin().lock();
+    loop {
+        print!("\n> ");
+        std::io::stdout().flush()?;
+        let mut line = String::new();
+        if input.read_line(&mut line)? == 0 {
+            return Ok(());
+        }
+        let req = match line.trim() {
+            "" => continue,
+            "help" => { println!("{HELP}"); continue; }
+            "status" => "/status",
+            r => { println!("Planning..."); r }
+        };
+        match UnixStream::connect(SOCK) {
+            Err(e) => println!("The agent service is not reachable ({e}). It restarts by itself; try again in a few seconds."),
+            Ok(mut c) => {
+                writeln!(c, "{}", req.replace('\n', " "))?;
+                for l in BufReader::new(c).lines() {
+                    if let Some(t) = serde_json::from_str(&l?).ok().and_then(|v| describe(&v)) {
+                        println!("{t}");
+                    }
+                }
+            }
+        }
+    }
+}
+
 fn main() {
     unsafe { libc::signal(libc::SIGUSR1, on_sigusr1 as *const () as libc::sighandler_t) };
     let args: Vec<String> = std::env::args().collect();
@@ -883,6 +985,10 @@ fn main() {
             eprintln!("agentd: {e}");
             std::process::exit(1);
         }
+        Some("console") => std::process::exit(match console() {
+            Ok(()) => 0,
+            Err(e) => { eprintln!("agentd: {e}"); 1 }
+        }),
         Some("ask") => std::process::exit(match ask(&args[2..].join(" ")) {
             Ok(ok) => if ok { 0 } else { 1 },
             Err(e) => { eprintln!("agentd: {e}"); 2 }
@@ -1016,8 +1122,19 @@ mod tests {
     }
 
     #[test]
+    fn console_explains_outcomes_in_plain_words() {
+        let d = |v: Value| describe(&v).unwrap_or_default();
+        assert_eq!(d(json!({"event": "STEP_VERIFIED", "step": 1, "action": "pipe", "output": "HI"})), "  ok  step 1: pipe -> \"HI\" (verified)");
+        assert_eq!(d(json!({"event": "TASK_COMPLETE", "status": "success", "steps": 2, "repairs": 1})), "Done: 2 step(s) verified, after 1 repair(s).");
+        assert!(d(json!({"event": "TASK_COMPLETE", "status": "fail", "error": "planner unavailable: no key"})).contains("Nothing was changed"));
+        assert!(d(json!({"event": "TASK_COMPLETE", "status": "fail", "error": "planner declined: no GUI"})).starts_with("I can't do that"));
+        assert!(d(json!({"event": "TASK_COMPLETE", "status": "fail", "steps": 1, "error": "repair budget exhausted"})).contains("1 step(s) had been verified"));
+        assert!(describe(&json!({"event": "WORKFLOW_COMPLETE"})).is_none() && describe(&json!("not an event")).is_none());
+    }
+
+    #[test]
     fn curl_config_values_cannot_break_out() {
-        assert!(config_safe("AQ.Ab8-x_y") && config_safe("gemini-3.8-flash"));
+        assert!(config_safe("AQ.Ab8-x_y") && MODEL_DEFAULT.split(',').all(config_safe));
         for bad in ["", "a\"\nurl = \"http://evil", "a b", "a\\", "k\nheader"] {
             assert!(!config_safe(bad), "{bad:?}");
         }

@@ -13,7 +13,8 @@ export PATH=$HOME/.cargo/bin:$PATH SOURCE_DATE_EPOCH=${SOURCE_DATE_EPOCH:-170000
 CARGO_TARGET_DIR=$B/target cargo build -q --locked --release --target x86_64-unknown-linux-gnu --manifest-path "$ROOT/agentd/Cargo.toml"
 rm -rf "$P" && mkdir -p "$P/DEBIAN" "$P/usr/bin" "$P/usr/lib/systemd/system" "$P/etc/agentd"
 install -m 755 "$B/target/x86_64-unknown-linux-gnu/release/agentd" "$P/usr/bin/agentd"
-install -m 644 "$ROOT/agentd/debian/agentd.service" "$P/usr/lib/systemd/system/agentd.service"
+install -m 644 "$ROOT/agentd/debian/agentd.service" "$ROOT/agentd/debian/agentd-console.service" \
+	"$ROOT/agentd/debian/agentd.socket" "$P/usr/lib/systemd/system/"
 install -m 755 "$ROOT/agentd/debian/postinst" "$ROOT/agentd/debian/prerm" "$ROOT/agentd/debian/postrm" "$P/DEBIAN/"
 chmod 700 "$P/etc/agentd" # gemini.env goes here; the key never ships in the package
 cat >"$P/DEBIAN/control" <<CTL
@@ -21,7 +22,7 @@ Package: agentd
 Version: $VERSION
 Architecture: amd64
 Maintainer: CUA-AgentOS <noreply@localhost>
-Depends: libc6 (>= 2.39), curl, ca-certificates
+Depends: libc6 (>= 2.39), curl, ca-certificates, passwd
 Section: admin
 Priority: optional
 Description: CUA-AgentOS agent daemon
