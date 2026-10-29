@@ -103,3 +103,10 @@ rubric 100/100 (`docs/grading-report.md`).
 the SIGUSR1 emergency stop, strict directive validation and allow-lists, a crash-safe install journal, and persistent `/data`
 (ext4 disk labelled `agentos-data`, optional; it is exercised by `tests/test-persist.sh`). Fast suite: `tests/regress.sh`.
 All gates were rerun from a clean rebuild.
+
+**Raspberry Pi 5 image (2026-10-29, not gated):** `scripts/build-pi5-img.sh` cross-builds the Cycle 06 system for aarch64
+(`ARCH=aarch64 KERNEL=rpi CROSS=aarch64-linux-gnu- BASE_FS=mmc`) into `build/pi5/cua-agentos-pi5.img`: MBR, p1 FAT32 boot
+(config.txt, cmdline.txt, Alpine `linux-rpi` kernel, initramfs, bcm2712 DTBs), p2 raw SquashFS (`/dev/mmcblk0p2`).
+Needs `gcc-aarch64-linux-gnu qemu-user-static mtools` (rootless copies: `. build/cross/env.sh`). Telemetry goes to
+`AGENT_TTY` (kernel cmdline env, default `/dev/ttyS0`; the Pi writes `agentos.log` on its FAT partition, no serial cable).
+The image ran on a real Pi 5 (all checks pass except AGENTD_READY 4.1 s > 3 s). Progress and next steps: `docs/pi5-2026-10-29.md`.

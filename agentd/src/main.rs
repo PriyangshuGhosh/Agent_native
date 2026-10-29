@@ -741,7 +741,8 @@ fn ms(t: Instant) -> f64 {
 
 fn main() {
     unsafe { libc::signal(libc::SIGUSR1, on_sigusr1 as *const () as libc::sighandler_t) };
-    let mut tty = OpenOptions::new().write(true).open("/dev/ttyS0").expect("open /dev/ttyS0");
+    let dev = std::env::var("AGENT_TTY").unwrap_or_else(|_| "/dev/ttyS0".into()); // set by agent-init's kernel cmdline
+    let mut tty = OpenOptions::new().append(true).open(&dev).expect("open telemetry tty");
     let session = [format!("{RUNTIME}/bus"), format!("{RUNTIME}/wayland-0")];
     if let Err(e) = wait_for("session sockets", 10, || session.iter().all(|p| Path::new(p).exists()).then_some(())) {
         let _ = writeln!(tty, "# agentd: {e}"); // non-JSON: gates ignore it
