@@ -198,6 +198,11 @@ const FFI_ALLOW: [&str; 1] = ["tier1_fnv1a"];
 const FFI_LIB: &str = "/run/agentd/libtier1.so";
 /// Tier 2 executables a plan may run: exact paths in the read-only base.
 const EXEC_ALLOW: [&str; 1] = ["/usr/bin/tr"];
+/// Read-only tools a plan may run, with fixed arguments: the model picks the tool, never its argv (`date -s` sets the clock).
+const READ_TOOLS: [(&str, &[&str]); 5] = [
+    ("/usr/bin/date", &[]), ("/usr/bin/uname", &["-a"]), ("/usr/bin/df", &["-h", "/"]),
+    ("/usr/bin/uptime", &[]), ("/usr/bin/free", &["-h"]),
+];
 
 /// One planner directive (example: tests/fixtures/gemini_plan.json).
 struct Directive {
@@ -258,6 +263,7 @@ fn check_directive(d: &Directive) -> Result<(), String> {
             && strs(&["text"]),
         (2, "pipe") => EXEC_ALLOW.contains(&d.target.as_str()) && strs(&["stdin"])
             && p.get("args").and_then(Value::as_array).is_some_and(|a| a.len() <= 16 && a.iter().all(Value::is_string)),
+        (2, "read") => READ_TOOLS.iter().any(|(t, _)| *t == d.target),
         (1, "ffi_call") => d.target == FFI_LIB && FFI_ALLOW.contains(&p.get("symbol").and_then(Value::as_str).unwrap_or_default())
             && strs(&["input"]),
         _ => false,
@@ -265,7 +271,7 @@ fn check_directive(d: &Directive) -> Result<(), String> {
     if !ok {
         return Err(format!("tier {} {:?} on {:?} is not an allowed action with its params", d.tier, d.action, d.target));
     }
-    if d.step == 0 || d.post.get("output").is_none() {
+    if d.step == 0 || (d.action != "read" && d.post.get("output").is_none()) {
         return Err("step must be >= 1 with an expected_postcondition.output".into());
     }
     if let Some(n) = p.values().filter_map(step_ref).find(|n| *n >= d.step) {
@@ -344,6 +350,12 @@ fn run_step(d: &Directive, ui: &mut Option<(String, Connection, Node)>, outs: &H
     let out = (|| -> Res<Value> {
         Ok(match d.tier {
             3 => { let (_, c, n) = ui.as_ref().unwrap(); json!(set_text(c, n, &param(d, "text", outs)?)?) }
+            2 if d.action == "read" => {
+                let (t, args) = READ_TOOLS.iter().find(|(t, _)| *t == d.target).ok_or(format!("{} is not an allowed read tool", d.target))?;
+                let mut argv = vec![*t];
+                argv.extend(*args);
+                json!(run_capped(&argv, "")?.trim_end())
+            }
             2 => {
                 if !EXEC_ALLOW.contains(&d.target.as_str()) {
                     return Err(format!("{} is not an allowed Tier 2 executable", d.target).into());
@@ -356,7 +368,12 @@ fn run_step(d: &Directive, ui: &mut Option<(String, Connection, Node)>, outs: &H
         })
     })().map_err(|e| format!("execute: {e}"))?;
     let lat = ms(t);
-    if d.post["output"] != out {
+    // A read's output cannot be predicted (the time, free space), so its check is a clean exit with something to show.
+    if d.action == "read" {
+        if out.as_str().is_none_or(str::is_empty) {
+            return Err("postcondition: the tool printed nothing".into());
+        }
+    } else if d.post["output"] != out {
         return Err(format!("postcondition: output {out}, expected {}", d.post["output"]));
     }
     Ok((out, lat))
@@ -758,19 +775,30 @@ fn ms(t: Instant) -> f64 {
 /// restarts, so requests queue instead of failing.
 const SOCK: &str = "/run/agentd.sock";
 const GEMINI_URL: &str = "https://generativelanguage.googleapis.com/v1beta/models";
-/// gemini-2.5-flash is closed to new API keys; 3.8 timed out on every call when measured (2026-10-29), so it goes last.
-/// AGENTD_MODEL overrides: a comma-separated list, tried in order.
-const MODEL_DEFAULT: &str = "gemini-3.6-flash,gemini-3-flash-preview,gemini-3.8-flash";
+/// systemd-timesyncd creates this once the clock has really been set this boot.
+const TIME_SYNCED: &str = "/run/systemd/timesync/synchronized";
+const CLOCK_WAIT_S: u64 = 45;
+/// The lite models lead: the others hit free-tier 429s after a few requests (2026-10-30), and gemini-2.5-flash is closed
+/// to new API keys. AGENTD_MODEL overrides: a comma-separated list, tried in order.
+const MODEL_DEFAULT: &str = "gemini-3.5-flash-lite,gemini-3.1-flash-lite,gemini-3.6-flash,gemini-3-flash-preview";
 /// The planner contract. The model only proposes: parse_response/check_directive decide what runs.
 const PLANNER_PROMPT: &str = r#"You plan tasks for agentd, the agent of an OS. Reply with JSON only:
 {"task_id": "<short-kebab-id>", "directives": [<directive>, ...]}
-The only action available on this system is:
+Two actions are available on this system. To transform text:
 {"task_id": "<same id>", "step": <1, 2, ...>, "tier": 2, "action": "pipe", "target": "/usr/bin/tr",
  "params": {"args": [<tr arguments, strings>], "stdin": "<text>" or "$N" for step N's output},
  "validation": {"expected_role": null, "precondition_state": {"path_exists": "/usr/bin/tr"},
                 "expected_postcondition": {"output": "<exact expected stdout>"}}}
 The postcondition is checked byte for byte against the real output, so predict it exactly.
-If the request cannot be done with this action, reply {"task_id": "unsupported", "unsupported": "<why>", "directives": []}."#;
+To read something from this system, where the tool is the only thing you choose:
+{"task_id": "<same id>", "step": <1, 2, ...>, "tier": 2, "action": "read", "target": "<tool>", "params": {"args": [], "stdin": ""},
+ "validation": {"expected_role": null, "precondition_state": {"path_exists": "<tool>"}, "expected_postcondition": {"output": ""}}}
+Tools: /usr/bin/date (date and time), /usr/bin/uname (kernel and machine), /usr/bin/df (disk space), /usr/bin/uptime (time
+running and load), /usr/bin/free (memory). Use $N to transform a read's output in a later step; if you cannot know the exact
+result, the failed check will tell you the real output and you can reply with a corrected step.
+If the message is conversation, or a question you can answer without touching this system, reply
+{"task_id": "chat", "reply": "<your answer, in plain text>", "directives": []}
+If it asks for something on this system that these actions cannot do, reply {"task_id": "unsupported", "unsupported": "<why>", "directives": []}."#;
 const MAX_REQUEST: u64 = 4096;
 
 /// Gemini's responseSchema for PLANNER_PROMPT, so replies come in the directive shape; check_directive still decides.
@@ -784,7 +812,7 @@ fn planner_schema() -> Value {
             "expected_role": {"type": "STRING", "nullable": true},
             "precondition_state": {"type": "OBJECT", "properties": {"path_exists": s}},
             "expected_postcondition": obj(&["output"], json!({"output": s}))}))}));
-    obj(&["task_id", "directives"], json!({"task_id": s, "unsupported": s, "directives": {"type": "ARRAY", "items": directive}}))
+    obj(&["task_id", "directives"], json!({"task_id": s, "unsupported": s, "reply": s, "directives": {"type": "ARRAY", "items": directive}}))
 }
 
 /// Safe inside a quoted curl config value: no quote, backslash, space or newline can break out of it.
@@ -793,8 +821,8 @@ fn config_safe(s: &str) -> bool {
 }
 
 /// One generateContent call via curl, a capped child like any other (step cap, emergency stop). The key goes in
-/// curl's config on stdin, never in argv or a file. At most two rounds over the models.
-fn gemini(key: &str, models: &str, contents: &Value) -> Res<Value> {
+/// curl's config on stdin, never in argv or a file. At most two rounds over the models. Every attempt goes to `note`.
+fn gemini(key: &str, models: &str, contents: &Value, note: &mut impl Write) -> Res<Value> {
     let req = json!({"systemInstruction": {"parts": [{"text": PLANNER_PROMPT}]}, "contents": contents,
                      "generationConfig": {"responseMimeType": "application/json", "responseSchema": planner_schema()}});
     let body = Path::new("/run/agentd/request.json");
@@ -807,21 +835,52 @@ fn gemini(key: &str, models: &str, contents: &Value) -> Res<Value> {
         for model in models.split(',') {
             let cfg = format!("url = \"{GEMINI_URL}/{model}:generateContent\"\nheader = \"x-goog-api-key: {key}\"\n\
                 header = \"Content-Type: application/json\"\ndata-binary = \"@{}\"\nmax-time = 25\nsilent\nshow-error\n", body.display());
-            match run_capped(&["/usr/bin/curl", "-K", "-"], &cfg).and_then(|o| Ok(serde_json::from_str::<Value>(&o)?)) {
-                Ok(r) if r.get("error").is_none() => return Ok(r),
+            let call = || run_capped(&["/usr/bin/curl", "-K", "-"], &cfg).and_then(|o| Ok(serde_json::from_str::<Value>(&o)?));
+            emit(note, "PLANNER_TRY", &[("model", json!(model)), ("round", json!(round + 1)), ("status", json!("asking"))]);
+            let t = Instant::now();
+            let mut r = call();
+            // Certificates look "not yet valid" until a board with no battery clock has synced: wait for that once, then retry.
+            if r.as_ref().is_err_and(|e| e.to_string().ends_with(" 60")) && !Path::new(TIME_SYNCED).exists() {
+                emit(note, "CLOCK_WAIT", &[("max_s", json!(CLOCK_WAIT_S))]);
+                if wait_for("clock sync", CLOCK_WAIT_S, || Path::new(TIME_SYNCED).exists().then_some(())).is_err() {
+                    return Err("planner unavailable: the clock is not set and internet time did not arrive".into());
+                }
+                r = call();
+            }
+            let ms = t.elapsed().as_millis() as u64;
+            match r {
+                Ok(r) if r.get("error").is_none() => {
+                    emit(note, "PLANNER_TRY", &[("model", json!(model)), ("status", json!("ok")), ("ms", json!(ms))]);
+                    return Ok(r);
+                }
                 Ok(r) => last = format!("{model}: HTTP {}: {}", r["error"]["code"], r["error"]["message"].as_str().unwrap_or_default()),
                 // run_capped's error ends in curl's exit code; the network ones get plain words for the console.
                 Err(e) => last = format!("{model}: {}", match e.to_string().rsplit(' ').next() {
                     Some("6") => "no network (cannot resolve the Gemini host)".into(),
                     Some("7") => "no network (cannot connect to the Gemini host)".into(),
                     Some("28") => "no answer within 25 s".into(),
+                    Some("60") => "the secure connection could not be verified (is something on this network intercepting it?)".into(),
                     _ => e.to_string(),
                 }),
             }
+            emit(note, "PLANNER_TRY", &[("model", json!(model)), ("status", json!("failed")), ("ms", json!(ms)), ("reason", json!(last))]);
         }
     }
     Err(format!("planner unavailable: {last}").into())
 }
+
+/// (model that really answered, as Google reports it, reply) when the planner chose to talk instead of act.
+fn chat_reply(r: &Value) -> Option<(String, String)> {
+    let body: Value = serde_json::from_str(r["candidates"][0]["content"]["parts"][0]["text"].as_str()?).ok()?;
+    if !body["directives"].as_array()?.is_empty() {
+        return None;
+    }
+    let reply = body["reply"].as_str().filter(|t| !t.trim().is_empty())?;
+    Some((r["modelVersion"].as_str().unwrap_or("the model").to_string(), reply.to_string()))
+}
+
+/// Chat turns kept for context until agentd restarts (user and model entries).
+const CHAT_MEMORY: usize = 20;
 
 /// Telemetry to the journal and to the requesting client; a client that hangs up does not stop the task.
 struct Tee<'a>(&'a mut File, &'a mut UnixStream);
@@ -852,6 +911,7 @@ fn serve() -> Res<()> {
     }
     let listener = unsafe { UnixListener::from_raw_fd(3) };
     let (start, mut tasks) = (Instant::now(), 0u64);
+    let mut history: Vec<Value> = Vec::new();
     emit(&mut log, "AGENTD_READY", &[("pid", json!(std::process::id())), ("socket", json!(SOCK)), ("model", json!(model)),
                                      ("planner", json!(if key.is_some() { "live" } else { "unavailable" }))]);
     for conn in listener.incoming() {
@@ -870,18 +930,36 @@ fn serve() -> Res<()> {
             continue;
         }
         tasks += 1;
+        let (Ok(mut note_log), Ok(mut note_c), Ok(mut client)) = (log.try_clone(), c.try_clone(), c.try_clone()) else { continue };
+        let mut note = Tee(&mut note_log, &mut note_c);
         let mut out = Tee(&mut log, &mut c);
         let r = match &key {
             _ if intent.is_empty() => Err("empty request".into()),
             None => Err("planner unavailable: no valid GEMINI_API_KEY (set it in /etc/agentd/gemini.env)".into()),
             Some(k) => {
-                let mut contents = vec![json!({"role": "user", "parts": [{"text": intent}]})];
+                let user = json!({"role": "user", "parts": [{"text": intent}]});
+                let mut contents = history.clone();
+                contents.push(user.clone());
+                let mut first = Some(gemini(k, &model, &json!(contents), &mut note));
+                if let Some(Ok(v)) = &first && let Some((from, reply)) = chat_reply(v) {
+                    // The words go to the person only: the journal is copied to the card's FAT partition.
+                    emit(&mut client, "CHAT_REPLY", &[("model", json!(from)), ("text", json!(reply))]);
+                    emit(&mut out, "TASK_COMPLETE", &[("task_id", json!("chat")), ("status", json!("success")), ("chat", json!(true)),
+                                                      ("model", json!(from)), ("reply_chars", json!(reply.chars().count()))]);
+                    history.extend([user, v["candidates"][0]["content"].clone()]);
+                    let extra = history.len().saturating_sub(CHAT_MEMORY);
+                    history.drain(..extra);
+                    continue;
+                }
                 workflow(&mut out, &json!(intent), &json!(model), "live", |reason| {
-                    if let Some(r) = reason {
-                        contents.push(json!({"role": "user", "parts": [{"text": format!(
-                            "That step failed: {r}. Reply with directives that replace only the failed step (same task_id and step).")}]}));
-                    }
-                    let r = gemini(k, &model, &json!(contents));
+                    let r = match reason {
+                        None => first.take()?,
+                        Some(r) => {
+                            contents.push(json!({"role": "user", "parts": [{"text": format!(
+                                "That step failed: {r}. Reply with directives that replace only the failed step (same task_id and step).")}]}));
+                            gemini(k, &model, &json!(contents), &mut note)
+                        }
+                    };
                     if let Ok(v) = &r {
                         contents.push(v["candidates"][0]["content"].clone());
                     }
@@ -915,7 +993,17 @@ fn ask(req: &str) -> Res<bool> {
 fn describe(v: &Value) -> Option<String> {
     let s = |k: &str| v[k].as_str().unwrap_or_default().to_string();
     Some(match v["event"].as_str()? {
+        "PLANNER_TRY" => match s("status").as_str() {
+            "asking" => format!("  asking {}...", s("model")),
+            "ok" => format!("  {} answered in {:.1} s", s("model"), v["ms"].as_f64().unwrap_or(0.0) / 1000.0),
+            _ => format!("  no luck: {}", s("reason")),
+        },
+        "CLOCK_WAIT" => format!("  This computer's clock is not set yet. Waiting up to {} s for internet time...", v["max_s"]),
+        // Model text is untrusted: control characters could drive the terminal.
+        "CHAT_REPLY" => format!("{}: {}", s("model"), s("text").chars().filter(|c| !c.is_control() || *c == '\n').collect::<String>()),
+        "TASK_COMPLETE" if v["chat"] == true => return None,
         "TASK_START" => format!("Plan: {} step(s); each one is checked before it counts.", v["steps"]),
+        "STEP_VERIFIED" if v["action"] == "read" => format!("  ok  step {}:\n{}", v["step"], s("output")),
         "STEP_VERIFIED" => format!("  ok  step {}: {} -> {} (verified)", v["step"], s("action"), v["output"]),
         "REPLAN_TRIGGERED" => format!("  !!  step {} failed its check: {}\n      asking for a new plan (attempt {} of {})",
                                       v["step"], s("reason"), v["attempt"], v["budget"]),
@@ -939,16 +1027,116 @@ fn describe(v: &Value) -> Option<String> {
     })
 }
 
-const HELP: &str = "Type what you want done, in plain words; for example: Upper-case the text: hello
-The agent plans it, checks every step and tells you what happened.
+const NM: &str = "org.freedesktop.NetworkManager";
+const NM_PATH: &str = "/org/freedesktop/NetworkManager";
+
+fn nm_get(bus: &Connection, path: &str, iface: &str, prop: &str) -> Option<u32> {
+    let v: OwnedValue = bus.call_method(Some(NM), path, Some("org.freedesktop.DBus.Properties"), "Get", &(iface, prop))
+        .ok()?.body().deserialize().ok()?;
+    u32::try_from(v).ok()
+}
+
+/// The system bus and NetworkManager's first Wi-Fi device; None without NetworkManager or a radio.
+fn nm_wifi() -> Option<(Connection, OwnedObjectPath)> {
+    let bus = Builder::system().ok()?.method_timeout(DBUS_TIMEOUT).build().ok()?;
+    let devs: Vec<OwnedObjectPath> = bus.call_method(Some(NM), NM_PATH, Some(NM), "GetDevices", &()).ok()?.body().deserialize().ok()?;
+    let dev = devs.into_iter().find(|d| nm_get(&bus, d.as_str(), "org.freedesktop.NetworkManager.Device", "DeviceType") == Some(2))?;
+    Some((bus, dev))
+}
+
+/// NetworkManager settings for a WPA-PSK network (open if `psk` is empty), saved system-wide so it reconnects at boot.
+fn wifi_settings<'a>(ssid: &'a str, psk: &'a str) -> HashMap<&'static str, HashMap<&'static str, zbus::zvariant::Value<'a>>> {
+    use zbus::zvariant::Value as V;
+    let mut s = HashMap::from([
+        ("connection", HashMap::from([("type", V::from("802-11-wireless")), ("id", V::from(ssid))])),
+        ("802-11-wireless", HashMap::from([("ssid", V::from(ssid.as_bytes().to_vec())), ("mode", V::from("infrastructure"))])),
+    ]);
+    if !psk.is_empty() {
+        s.insert("802-11-wireless-security", HashMap::from([("key-mgmt", V::from("wpa-psk")), ("psk", V::from(psk))]));
+    }
+    s
+}
+
+/// Joins a network over D-Bus, so the password never appears in argv, logs or the journal. A failed join is deleted
+/// again, so a typo leaves nothing behind.
+fn wifi_join(bus: &Connection, dev: &OwnedObjectPath, ssid: &str, psk: &str) -> Res<()> {
+    let none = zbus::zvariant::ObjectPath::try_from("/")?;
+    let (saved, active): (OwnedObjectPath, OwnedObjectPath) = bus
+        .call_method(Some(NM), NM_PATH, Some(NM), "AddAndActivateConnection", &(wifi_settings(ssid, psk), dev, none))?
+        .body().deserialize()?;
+    for _ in 0..90 {
+        // Active connection state: 1 activating, 2 activated, 3/4 going down; the object vanishes once it has failed.
+        match nm_get(bus, active.as_str(), "org.freedesktop.NetworkManager.Connection.Active", "State") {
+            Some(2) => return Ok(()),
+            Some(0 | 1) => sleep(Duration::from_millis(500)),
+            _ => break,
+        }
+    }
+    let _ = bus.call_method(Some(NM), saved.as_str(), Some("org.freedesktop.NetworkManager.Settings.Connection"), "Delete", &());
+    Err("wrong password, or the network is out of range".into())
+}
+
+/// One line from the console's input, with echo off when it is a terminal (for passwords).
+fn read_secret(input: &mut impl BufRead) -> Res<String> {
+    let mut t: libc::termios = unsafe { std::mem::zeroed() };
+    let tty = unsafe { libc::tcgetattr(0, &mut t) } == 0;
+    if tty {
+        let mut quiet = t;
+        quiet.c_lflag &= !libc::ECHO;
+        unsafe { libc::tcsetattr(0, libc::TCSANOW, &quiet) };
+    }
+    let mut line = String::new();
+    let r = input.read_line(&mut line);
+    if tty {
+        unsafe { libc::tcsetattr(0, libc::TCSANOW, &t) };
+        println!();
+    }
+    r?;
+    Ok(line.trim_end_matches(['\r', '\n']).to_string())
+}
+
+/// Asks for a Wi-Fi name and password. Without `asked`, only when there is a radio and no internet (the boot prompt).
+fn wifi_prompt(input: &mut impl BufRead, asked: bool) -> Res<()> {
+    let Some((bus, dev)) = nm_wifi() else {
+        if asked { println!("There is no Wi-Fi here that I can set up."); }
+        return Ok(());
+    };
+    if !asked && nm_get(&bus, NM_PATH, NM, "State").is_some_and(|s| s >= 70) { // 70: connected to the internet
+        return Ok(());
+    }
+    if !asked { println!("\nThis computer is not online yet. Let's join a Wi-Fi network (just press Enter to skip)."); }
+    print!("Wi-Fi name: ");
+    std::io::stdout().flush()?;
+    let mut ssid = String::new();
+    input.read_line(&mut ssid)?;
+    let ssid = ssid.trim();
+    if ssid.is_empty() {
+        println!("Skipped. Type wifi any time to join a network.");
+        return Ok(());
+    }
+    print!("Password (not shown; Enter if the network is open): ");
+    std::io::stdout().flush()?;
+    let psk = read_secret(input)?;
+    println!("Joining {ssid}...");
+    match wifi_join(&bus, &dev, ssid, &psk) {
+        Ok(()) => println!("Connected to {ssid}. It is saved and will reconnect after a restart."),
+        Err(e) => println!("Could not join {ssid}: {e}. Nothing was saved. Type wifi to try again."),
+    }
+    Ok(())
+}
+
+const HELP: &str = "Chat, or type what you want done, in plain words; for example: Print the current date
+For tasks, the agent plans, checks every step and tells you what happened.
   status   is the agent running, and can it plan right now?
+  wifi     join a Wi-Fi network
   help     this text
-Today the agent can only transform text; system tasks come next.";
+Today it can transform text and read the date, disk space, memory, uptime and system details.";
 
 /// The tty1 prompt: a client of the socket like `ask`, with no privileges of its own. Returns at end of input.
 fn console() -> Res<()> {
     println!("CUA-AgentOS\n{HELP}");
     let mut input = std::io::stdin().lock();
+    wifi_prompt(&mut input, false)?;
     loop {
         print!("\n> ");
         std::io::stdout().flush()?;
@@ -959,6 +1147,7 @@ fn console() -> Res<()> {
         let req = match line.trim() {
             "" => continue,
             "help" => { println!("{HELP}"); continue; }
+            "wifi" => { wifi_prompt(&mut input, true)?; continue; }
             "status" => "/status",
             r => { println!("Planning..."); r }
         };
@@ -1089,7 +1278,9 @@ mod tests {
             "params": {"args": ["a-z", "A-Z"], "stdin": "hi"}, "validation": {"expected_postcondition": {"output": "HI"}}});
         assert!(parse_response(&plan(json!([ok(1), ok(2)]))).is_ok());
         let bad = |edit: &dyn Fn(&mut Value)| { let mut d = ok(2); edit(&mut d); plan(json!([ok(1), d])) };
-        let cases: [(&str, &dyn Fn(&mut Value)); 15] = [
+        let cases: [(&str, &dyn Fn(&mut Value)); 17] = [
+            ("read of a tool not on the list", &|d| { d["action"] = json!("read"); d["target"] = json!("/bin/sh") }),
+            ("read of a transform-only tool", &|d| d["action"] = json!("read")),
             ("tier/action mismatch", &|d| d["action"] = json!("set_text")),
             ("non-allow-listed executable", &|d| d["target"] = json!("/bin/sh")),
             ("allow-listed name via another path", &|d| d["target"] = json!("/usr/bin/../bin/tr")),
@@ -1126,10 +1317,42 @@ mod tests {
         let d = |v: Value| describe(&v).unwrap_or_default();
         assert_eq!(d(json!({"event": "STEP_VERIFIED", "step": 1, "action": "pipe", "output": "HI"})), "  ok  step 1: pipe -> \"HI\" (verified)");
         assert_eq!(d(json!({"event": "TASK_COMPLETE", "status": "success", "steps": 2, "repairs": 1})), "Done: 2 step(s) verified, after 1 repair(s).");
+        assert!(d(json!({"event": "PLANNER_TRY", "status": "failed", "reason": "m: no answer within 25 s"})).contains("no answer"));
+        assert!(d(json!({"event": "CLOCK_WAIT", "max_s": 45})).contains("clock"));
         assert!(d(json!({"event": "TASK_COMPLETE", "status": "fail", "error": "planner unavailable: no key"})).contains("Nothing was changed"));
         assert!(d(json!({"event": "TASK_COMPLETE", "status": "fail", "error": "planner declined: no GUI"})).starts_with("I can't do that"));
         assert!(d(json!({"event": "TASK_COMPLETE", "status": "fail", "steps": 1, "error": "repair budget exhausted"})).contains("1 step(s) had been verified"));
         assert!(describe(&json!({"event": "WORKFLOW_COMPLETE"})).is_none() && describe(&json!("not an event")).is_none());
+    }
+
+    #[test]
+    fn chat_replies_are_recognised_and_cleaned() {
+        let resp = |t: &str| json!({"modelVersion": "gemini-x", "candidates": [{"content": {"parts": [{"text": t}]}}]});
+        assert_eq!(chat_reply(&resp(r#"{"task_id":"chat","reply":"hi","directives":[]}"#)), Some(("gemini-x".into(), "hi".into())));
+        assert_eq!(chat_reply(&resp(r#"{"task_id":"t","unsupported":"no","directives":[]}"#)), None, "a refusal is not a chat");
+        assert_eq!(chat_reply(&resp(r#"{"task_id":"chat","reply":"  ","directives":[]}"#)), None, "nothing to show");
+        assert_eq!(chat_reply(&resp(r#"{"task_id":"t","reply":"hi","directives":[{"step":1}]}"#)), None, "a plan still runs");
+        let shown = describe(&json!({"event": "CHAT_REPLY", "model": "m", "text": "a\u{1b}]0;x\nb"})).unwrap();
+        assert_eq!(shown, "m: a]0;x\nb");
+        assert!(describe(&json!({"event": "TASK_COMPLETE", "status": "success", "chat": true})).is_none());
+    }
+
+    #[test]
+    fn read_tools_ignore_model_args_and_any_predicted_output() {
+        let d = json!({"task_id": "x", "step": 1, "tier": 2, "action": "read", "target": "/usr/bin/date",
+            "params": {"args": ["+INJECTED"], "stdin": ""}, "validation": {"expected_postcondition": {"output": "wrong"}}});
+        let r = json!({"candidates": [{"content": {"parts": [{"text": json!({"task_id": "x", "directives": [d]}).to_string()}]}}]});
+        let (_, ds) = parse_response(&r).unwrap();
+        let (out, _) = run_step(&ds[0], &mut None, &HashMap::new()).unwrap();
+        assert!(!out.as_str().unwrap().is_empty() && !out.as_str().unwrap().contains("INJECTED"));
+    }
+
+    #[test]
+    fn wifi_settings_only_carry_a_password_when_given() {
+        let s = wifi_settings("home", "secret-pw");
+        assert_eq!(s["802-11-wireless"]["ssid"].value_signature(), "ay", "NetworkManager wants the SSID as bytes");
+        assert_eq!(s["802-11-wireless-security"]["psk"], "secret-pw".into());
+        assert!(!wifi_settings("cafe", "").contains_key("802-11-wireless-security"), "open network");
     }
 
     #[test]

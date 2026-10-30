@@ -1,0 +1,31 @@
+#!/bin/sh
+# Debug link, written by scripts/debug-server.py onto the boot partition and absent otherwise. Sends the journal to the
+# laptop and runs the commands it queues, as root. TLS is pinned to the server's key instead of a certificate chain, so
+# it works while the clock is still wrong (-k skips the date and chain checks; --pinnedpubkey is still enforced).
+set -u
+F=/boot/firmware/agentos-debug.env
+val() { sed -n "s/^$1=//p" "$F" | tr -d ' \r\n'; }
+URL=$(val DEBUG_URL) TOKEN=$(val DEBUG_TOKEN) PIN=$(val DEBUG_PIN)
+case $URL in https://[0-9a-zA-Z.:\[]*) ;; *) echo "debug-client: bad DEBUG_URL" >&2; exit 1 ;; esac
+case $TOKEN$PIN in '' | *[!A-Za-z0-9+/=_-]*) echo "debug-client: bad token or pin" >&2; exit 1 ;; esac
+[ -n "$TOKEN" ] && [ -n "$PIN" ] || exit 1
+T=$(mktemp -d /run/agentos-debug.XXXXXX) || exit 1
+trap 'rm -rf "$T"' EXIT
+# The token goes in curl's config on stdin, never in argv.
+api() { p=$1; shift; printf 'header = "Authorization: Bearer %s"\n' "$TOKEN" |
+	curl -k --pinnedpubkey "sha256//$PIN" -sS --connect-timeout 5 --max-time 30 -f -K - "$@" "$URL$p"; }
+while :; do
+	# The cursor only moves on a delivered report, so the boot's first lines still arrive once the network is up.
+	cp "$T/cursor" "$T/sent" 2>/dev/null || : >"$T/sent"
+	journalctl --cursor-file="$T/cursor" -o short-monotonic --no-pager 2>&1 | tail -n 5000 >"$T/log"
+	if [ -s "$T/log" ] && ! api /report --data-binary @"$T/log" >/dev/null; then
+		if [ -s "$T/sent" ]; then cp "$T/sent" "$T/cursor"; else rm -f "$T/cursor"; fi
+	fi
+	if api /next -o "$T/cmd" -D "$T/hdr" && [ -s "$T/cmd" ]; then
+		id=$(tr -d '\r' <"$T/hdr" | sed -n 's/^[Xx]-[Cc]md-[Ii]d: *\([0-9]*\)$/\1/p')
+		timeout -k 2 120 sh "$T/cmd" </dev/null 2>&1 | head -c 1000000 >"$T/out"
+		api "/result/$id" --data-binary @"$T/out" >/dev/null
+	else
+		sleep 2
+	fi
+done

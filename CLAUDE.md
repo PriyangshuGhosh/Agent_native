@@ -112,13 +112,17 @@ Needs `gcc-aarch64-linux-gnu qemu-user-static mtools` (rootless copies: `. build
 The image ran on a real Pi 5 (all checks pass except AGENTD_READY 4.1 s > 3 s). Progress and next steps: `docs/pi5-2026-10-29.md`.
 
 ## Debian base direction (2026-10-29, branch `debian-base`)
+**Paused 2026-10-30. To resume, read `docs/RESUME.md` first** (state, known gaps, what's left, host setup, commands).
 Product direction is now `CUA-AgentOS_goal.md`: a general-purpose distro (amd64 + arm64, Pi 5 first among the ARM boards),
 built as **Debian 13 (trixie) + our packages**. The work is reused, not reinvented. The Alpine/agent-init cycles above
 stay as a record, and their gates must keep passing. On Debian: systemd is PID 1, and agent-init and the ≤1000 ms boot
 budgets do not apply. amd64 is tested only in a throwaway KVM guest (`-snapshot`); hardware tests happen on the Pi 5.
 - **Model:** `gemini-2.5-flash` is closed to new API keys, so live calls use `AGENTD_MODEL` (default
-  `gemini-3.6-flash,gemini-3-flash-preview,gemini-3.8-flash`, tried in order; 3.8 timed out on every call when measured),
-  with Gemini `responseSchema` forcing the directive shape. The Alpine gates still replay the recorded 2.5-flash fixture.
+  `gemini-3.5-flash-lite,gemini-3.1-flash-lite,gemini-3.6-flash,gemini-3-flash-preview`, tried in order; the lite models lead
+  because the others hit free-tier 429s after a few requests, and 3.8 was dropped because it timed out or returned 503 on
+  every call measured), with Gemini `responseSchema` forcing the directive shape. Replaying real planner requests (2026-10-30)
+  showed the slow or failed answers are on Gemini's side (503s, a 429, first byte up to 29 s; TLS under 0.35 s). Each attempt
+  is logged as `PLANNER_TRY`; `CLOCK_WAIT` means a task is waiting for internet time (Pi 5: no set clock at boot). The Alpine gates still replay the recorded 2.5-flash fixture.
 - **Step 1 (done):** `scripts/build-deb.sh` builds `build/deb/agentd_<ver>_amd64.deb`: `agentd serve` as `agentd.service`
   (DynamicUser, ProtectSystem=strict, Restart=on-failure with StartLimitBurst=5/60 s). Requests arrive through
   `agentd.socket` (`/run/agentd.sock`, 0660, group `agentd-users`, socket-activated, so it survives agentd restarts);
@@ -134,4 +138,11 @@ budgets do not apply. amd64 is tested only in a throwaway KVM guest (`-snapshot`
   `AGENTD_STATUS` (planner, models, uptime, tasks), which was added for this step. No approval prompts yet, since there
   are no high-risk actions. Tested by piping input through the console in the VM; tty1 has not yet been looked at on a
   real screen.
-- **Next:** step 3, an mkosi config that builds both the amd64 image and the Pi 5 SD image (arm64 .deb).
+- **Step 3:** `scripts/build-debian-img.sh` (mmdebstrap, not mkosi; `ARCH=amd64` or `arm64`, about 17 min under emulation,
+  needs `. build/cross/env.sh`). Test: `tests/test-debian-img.sh` boots amd64 in a throwaway KVM guest.
+- **Chat and read tools:** the planner may answer with `CHAT_REPLY` (labelled with the `modelVersion` Google returns; the words
+  go only to the client, never the journal; 20 turns of memory until agentd restarts). Tier 2 `read` runs a fixed tool list
+  (`date`, `uname`, `df`, `uptime`, `free`) with fixed args; its check is a clean exit with output, since it cannot be predicted.
+- **Debug link (opt-in, never in the image):** `scripts/debug-server.py card <FAT path>` puts `agentos-debug.env` on a card;
+  `serve` on the laptop then receives the journal in `build/debug/pi.log`, and `send '<cmd>'` runs a command on the Pi as root.
+  TLS is pinned to the server's key (works with a wrong clock) plus a token. Delete the file from the card to turn it off.

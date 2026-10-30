@@ -1,0 +1,22 @@
+#!/bin/sh
+# Copies kernel $1 and its initramfs onto the FAT boot partition (/boot/firmware), which is what actually boots:
+# systemd-boot on amd64 (vmlinuz, initrd.img), the Pi 5 EEPROM loader on arm64 (kernel_2712.img, initramfs_2712, DTBs).
+# Run by apt after kernel installs (/etc/kernel/postinst.d) and initramfs updates (/etc/initramfs/post-update.d).
+# shortcut: the kernel installed or updated last wins, even if older; keep only one kernel flavour installed.
+set -eu
+V=${1:?kernel version}
+B=/boot/firmware
+[ -d $B ] || exit 0
+put() { [ ! -e "$1" ] || { cp "$1" "$B/$2.new" && mv "$B/$2.new" "$B/$2"; }; }
+case $V in
+*-rpi-2712)
+	put /boot/vmlinuz-$V kernel_2712.img
+	put /boot/initrd.img-$V initramfs_2712
+	D=/usr/lib/linux-image-$V
+	cp $D/broadcom/bcm2712*.dtb $B/
+	rm -rf $B/overlays && cp -r $D/overlays $B/ ;;
+*-rpi-*) ;; # other Pi models are not set up by this image
+*)
+	put /boot/vmlinuz-$V vmlinuz
+	put /boot/initrd.img-$V initrd.img ;;
+esac

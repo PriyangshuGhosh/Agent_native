@@ -1,0 +1,12 @@
+[Unit]
+Description=Debug link to a developer's laptop (only when agentos-debug.env is on the boot partition; it runs commands as root)
+ConditionPathExists=/boot/firmware/agentos-debug.env
+RequiresMountsFor=/boot/firmware
+
+[Service]
+ExecStart=/usr/libexec/agentos/debug-client
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
