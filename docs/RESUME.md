@@ -11,12 +11,11 @@ Written 2026-10-30, when work paused. Start here, then read `CLAUDE.md` (decisio
   on-screen typing, simulated Wi-Fi, chat and the debug link.
 - **The old Alpine/agent-init cycles:** all 8 passed earlier and stay as a record. `tests/regress.sh` passed on 2026-10-30,
   but it only replays recorded logs. The real gates have not been rebooted since the latest `agentd` changes.
-- **What the agent can do on Debian:** Tier 2 `tr`, the read tools (`date`, `uname`, `df`, `uptime`, `free`) and chat.
-  It cannot change the system yet.
+- **What the agent can do on Debian:** Tier 2 `tr`, the read tools (`date`, `uname`, `df`, `uptime`, `free`), chat, and status/restart of
+  three allowlisted services through the broker. It can make no other system change yet.
 
 ## Known gaps to remember
-- **The Pi image is older than the code.** `build/debian-img/cua-agentos-pi5.img` was built at 17:04 and `agentd/src/main.rs`
-  last changed at 18:01. Rebuild it before flashing.
+- **Rebuild the images for the broker.** `build-debian-img.sh` enables its sockets, but the `.img` files predate it. The Pi was upgraded over the debug link on 2026-11-08.
 - **tty2 recovery has no usable login by default.** Root is locked unless the image is built with `ROOT_PASSWORD_HASH`
   (`tests/test-debian-img.sh` checks `root_locked`), so a default image has no working recovery login.
 - **Image builds are not pinned.** `build-debian-img.sh` installs current Debian packages, so two builds can differ.
@@ -25,8 +24,7 @@ Written 2026-10-30, when work paused. Start here, then read `CLAUDE.md` (decisio
   running commands as root from the laptop, so delete it from any card that is shared or used for real.
 
 ## What's left, in order (chunks are from `CUA-AgentOS_goal.md`)
-1. **Privileged broker and approvals (chunk 4):** not started. Begin with one safe action, such as restarting an
-   allowlisted service. This is the recommended next step, and it unblocks the rest.
+1. **Privileged broker and approvals (chunk 4):** built on 2026-11-08 (see `CLAUDE.md`). `tests/test-debian-vm.sh` covers it. Add operations through its compiled-in table.
 2. **One modifying Debian task with rollback (chunk 5):** the install journal in `agentd` is reusable, but only
    Alpine test packages use it.
 3. **Health checks and limited repair (chunk 6):** not started.

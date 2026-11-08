@@ -18,11 +18,12 @@ umask 077
 
 cp "$DEB" "$S/agentd.deb"
 EXPECT="installed_active ready_without_key no_key_fails_cleanly unprivileged socket_group_only console_on_tty1
-	console_offline crash_restarted"
+	console_offline crash_restarted broker_sandboxed broker_identities broker_status broker_rejects broker_restart_verified
+	broker_approval_allowed broker_approval_refused broker_approval_timeout broker_hangup_cancels broker_rate_limit broker_audit"
 if [ -r "$KEY_FILE" ]; then
 	printf 'GEMINI_API_KEY=%s\n' "$(tr -d ' \r\n' <"$KEY_FILE")" >"$S/gemini.env"
 	[ -z "${AGENTD_MODEL:-}" ] || echo "AGENTD_MODEL=$AGENTD_MODEL" >>"$S/gemini.env"
-	EXPECT="$EXPECT live_task_verified console_live key_not_logged"
+	EXPECT="$EXPECT live_task_verified console_live live_broker_restart console_approval key_not_logged"
 fi
 printf 'instance-id: agentd-test\nlocal-hostname: agentd-test\n' >"$S/meta-data"
 cat >"$S/user-data" <<'UD'
@@ -64,6 +65,53 @@ echo "$out"
 active && [ "$(systemctl show -p MainPID --value agentd)" != "$pid" ] && [ "$(systemctl show -p NRestarts --value agentd)" = 1 ]
 check crash_restarted $?
 
+# Broker: requests are sent with the running agentd's real uid and groups. The policy names units a cloud image may
+# lack, so harmless stand-ins are created for those (this guest is thrown away).
+for u in cron NetworkManager systemd-timesyncd; do
+	[ "$(systemctl show -p LoadState --value $u.service)" = loaded ] || printf '[Service]\nExecStart=/bin/sleep infinity\n' >/etc/systemd/system/$u.service
+done
+systemctl daemon-reload; systemctl unmask -q systemd-timesyncd.service 2>/dev/null; systemctl start cron.service NetworkManager.service systemd-timesyncd.service
+B=/run/agentd-broker.sock AP=/run/agentd-approve.sock BC="python3 /mnt/seed/bc.py"
+apid=$(systemctl show -p MainPID --value agentd)
+AU=$(awk '/^Uid:/{print $2}' /proc/"$apid"/status) AG=$(awk '/^Gid:/{print $2}' /proc/"$apid"/status)
+AGS=$(awk '/^Groups:/{$1=""; print}' /proc/"$apid"/status | xargs | tr ' ' ,)
+as_agentd() { setpriv --reuid="$AU" --regid="$AG" --groups="$AGS" $BC "$@"; }
+as_console() { setpriv --reuid=nobody --regid=nogroup --groups="$(getent group agentd-users | cut -d: -f3)" $BC "$@"; }
+req() { printf '{"op":"service.%s","unit":"%s.service","task_id":"t","step":1}' "$1" "$2"; }
+since() { systemctl show -p ActiveEnterTimestampMonotonic --value "$1.service"; }
+AUD=/var/log/agentd-broker/audit.jsonl
+# Starts an NM restart in the background and waits until the broker is asking; sets ID.
+ask_nm() { setpriv --reuid="$AU" --regid="$AG" --groups="$AGS" $BC $B "$(req restart NetworkManager)" >/run/nm.out 2>&1 & NMP=$!; ID=; for _ in $(seq 50); do ID=$(sed -n 's/.*"id":\([0-9]*\).*/\1/p' /run/nm.out); [ -n "$ID" ] && return; sleep 0.1; done; }
+
+as_agentd $B "$(req status cron)" | grep -q '"status":"ok"'; check broker_status $?
+bpid=$(systemctl show -p MainPID --value agentd-broker)
+[ "$(awk '/^CapEff:/{print $2}' /proc/"$bpid"/status)" = 0000000000000000 ] && [ "$(awk '/^NoNewPrivs:/{print $2}' /proc/"$bpid"/status)" = 1 ]; check broker_sandboxed $?
+! as_agentd $AP '{"id":1}' 2>/dev/null && ! as_console $B "$(req status cron)" 2>/dev/null &&
+	! setpriv --reuid=nobody --regid=nogroup --clear-groups $BC $B "$(req status cron)" 2>/dev/null &&
+	! setpriv --reuid=nobody --regid=nogroup --clear-groups $BC $AP '{"id":1}' 2>/dev/null; check broker_identities $?
+r=0; before=$(since cron)
+long=$(head -c 5000 /dev/zero | tr '\0' a)
+for bad in 'not json' '{}' "$long" "$(req stop cron)" "$(req restart agentd)" "$(req restart agentd-broker)" "$(req restart agentos-debug)" \
+	"$(req restart ../cron)" '{"op":"service.restart","unit":"cron.service;reboot","task_id":"t","step":1}' \
+	'{"op":"service.restart","unit":"cron.service","task_id":"t","step":1,"approved":true}'; do
+	as_agentd $B "$bad" | grep -q '"status":"rejected"' || { r=1; echo "not rejected: $(echo "$bad" | cut -c1-80)"; }
+done
+[ "$(since cron)" = "$before" ] && [ "$(systemctl show -p MainPID --value agentd)" = "$apid" ] || r=1; check broker_rejects $r
+
+before=$(since cron); as_agentd $B "$(req restart cron)" | grep -q '"status":"ok"' && [ "$(since cron)" != "$before" ]; check broker_restart_verified $?
+before=$(since NetworkManager); ask_nm; out=$(as_console $AP "{\"id\":$ID}" yes); wait $NMP
+echo "$out" | grep -q 'Wi-Fi' && grep -q '"status":"ok"' /run/nm.out && [ "$(since NetworkManager)" != "$before" ]; check broker_approval_allowed $?
+before=$(since NetworkManager); ask_nm; as_console $AP "{\"id\":$ID}" no >/dev/null; wait $NMP
+grep -q '"status":"denied"' /run/nm.out && [ "$(since NetworkManager)" = "$before" ]; check broker_approval_refused $?
+before=$(since NetworkManager); ask_nm; wait $NMP
+grep -q '"status":"denied"' /run/nm.out && grep -q 'nobody answered' /run/nm.out && [ "$(since NetworkManager)" = "$before" ]; check broker_approval_timeout $?
+before=$(since NetworkManager); ask_nm; kill $NMP; sleep 1; wait $NMP 2>/dev/null
+tail -n 1 $AUD | grep -q '"phase":"cancelled"' && [ "$(since NetworkManager)" = "$before" ]; check broker_hangup_cancels $?
+as_agentd $B "$(req restart cron)" | grep -q '"status":"ok"' && as_agentd $B "$(req restart cron)" | grep -q '"status":"ok"' &&
+	as_agentd $B "$(req restart cron)" | grep -q 'too many times'; check broker_rate_limit $?
+r=0; for p in requested rejected approved denied cancelled started verified; do grep -q "\"phase\":\"$p\"" $AUD || { r=1; echo "no audit phase $p"; }; done
+[ "$(stat -c '%a %U' $AUD)" = "640 root" ] || r=1; check broker_audit $r
+
 if [ -e /mnt/seed/gemini.env ]; then
 	install -m 600 /mnt/seed/gemini.env /etc/agentd/gemini.env
 	systemctl restart agentd; active
@@ -75,13 +123,32 @@ if [ -e /mnt/seed/gemini.env ]; then
 	out=$(console "Upper-case the text: console works"); rc=$?
 	echo "$out"
 	[ $rc = 0 ] && echo "$out" | grep -q "Done: 1 step(s) verified" && echo "$out" | grep -q "CONSOLE WORKS"; check console_live $?
+	out=$(agentd ask "Restart the systemd-timesyncd service"); rc=$?
+	echo "$out"
+	[ $rc = 0 ] && echo "$out" | grep STEP_VERIFIED | grep -q '"action":"broker"'; check live_broker_restart $?
+	out=$(console "Restart the NetworkManager service" yes); rc=$?
+	echo "$out"
+	[ $rc = 0 ] && echo "$out" | grep -q "needs your approval" && echo "$out" | grep -q "Restarted NetworkManager"; check console_approval $?
 	key=$(sed -n 's/^GEMINI_API_KEY=//p' /etc/agentd/gemini.env)
 	! journal | grep -qF "$key" && ! journalctl -b -o cat --no-pager | grep -qF "$key"; check key_not_logged $?
 fi
-[ $failed = 0 ] || { echo "dns from the guest:"; getent ahosts generativelanguage.googleapis.com | head -3; resolvectl status 2>&1 | grep -E "DNS Server|Current" ; systemctl status --no-pager agentd agentd-console; journalctl -b --no-pager -o short-monotonic -u agentd -u agentd-console | tail -40; }
+[ $failed = 0 ] || { echo "dns from the guest:"; getent ahosts generativelanguage.googleapis.com | head -3; resolvectl status 2>&1 | grep -E "DNS Server|Current" ; systemctl status --no-pager agentd agentd-console; journalctl -b --no-pager -o short-monotonic -u agentd -u agentd-console -u agentd-broker | tail -40; }
 echo "GUEST_DONE"
 GUEST
-xorriso -as mkisofs -quiet -V cidata -J -r -o "$S/seed.iso" "$S/user-data" "$S/meta-data" "$S/guest.sh" "$S/agentd.deb" \
+# Sends each line, showing one reply between them, then prints replies until the broker closes the connection.
+cat >"$S/bc.py" <<'PY'
+import socket, sys
+s = socket.socket(socket.AF_UNIX)
+s.connect(sys.argv[1])
+f = s.makefile()
+for i, l in enumerate(sys.argv[2:]):
+    s.sendall(l.encode() + b"\n")
+    if i + 3 < len(sys.argv):
+        print(f.readline(), end="", flush=True)
+for l in f:
+    print(l, end="", flush=True)
+PY
+xorriso -as mkisofs -quiet -V cidata -J -r -o "$S/seed.iso" "$S/user-data" "$S/meta-data" "$S/guest.sh" "$S/agentd.deb" "$S/bc.py" \
 	$( [ -e "$S/gemini.env" ] && echo "$S/gemini.env" ) 2>/dev/null
 
 timeout -s KILL 300 qemu-system-x86_64 -enable-kvm -cpu host -m 2048 -smp 2 -snapshot -nographic -no-reboot \

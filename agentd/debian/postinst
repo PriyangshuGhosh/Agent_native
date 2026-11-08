@@ -2,11 +2,19 @@
 set -e
 if [ "$1" = configure ]; then
 	getent group agentd-users >/dev/null || groupadd --system agentd-users
+	getent group agentd-broker >/dev/null || groupadd --system agentd-broker
 fi
 if [ "$1" = configure ] && [ -d /run/systemd/system ]; then
 	systemctl daemon-reload
-	systemctl enable agentd.socket agentd.service agentd-console.service
-	systemctl disable getty@tty1.service 2>/dev/null || true
-	systemctl start agentd.socket
-	systemctl restart agentd.service agentd-console.service
+	systemctl enable agentd.socket agentd.service agentd-broker.socket agentd-approve.socket
+	systemctl start agentd.socket agentd-broker.socket agentd-approve.socket
+	systemctl try-restart agentd-broker.service
+	if [ -e /usr/lib/systemd/system/agentos-kiosk.service ]; then
+		# The image's kiosk owns tty1, and starting the text console would stop it.
+		systemctl restart agentd.service
+	else
+		systemctl enable agentd-console.service
+		systemctl disable getty@tty1.service 2>/dev/null || true
+		systemctl restart agentd.service agentd-console.service
+	fi
 fi

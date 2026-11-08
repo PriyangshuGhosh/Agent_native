@@ -43,6 +43,7 @@ Cycle 05 cognitive-loop markers (added at the user's request): `TASK_START`, `ST
 Cycle 06 storage/lifecycle markers (added at the user's request): `STORAGE_READY`, `LIFECYCLE_INSTALL`,
 `LIFECYCLE_VERIFIED`, `LIFECYCLE_FAIL_INJECTED`, `ROLLBACK_TRIGGERED`, `ROLLBACK_VERIFIED`. They are emitted
 alongside the canonical `CAPABILITY_INSTALLED` / `CAPABILITY_ROLLBACK`, and gate 06 asserts both sets.
+Debian broker markers (added at the user's request, 2026-11-08): `BROKER_AUDIT` (with `phase`), `APPROVAL_REQUIRED`.
 
 ## The 8 cycles (canonical; `overview/phases.html` is informational only)
 | # | Cycle | Gate script (must exit 0) | Gate condition |
@@ -143,6 +144,11 @@ budgets do not apply. amd64 is tested only in a throwaway KVM guest (`-snapshot`
 - **Chat and read tools:** the planner may answer with `CHAT_REPLY` (labelled with the `modelVersion` Google returns; the words
   go only to the client, never the journal; 20 turns of memory until agentd restarts). Tier 2 `read` runs a fixed tool list
   (`date`, `uname`, `df`, `uptime`, `free`) with fixed args; its check is a clean exit with output, since it cannot be predicted.
+- **Privileged broker (chunk 4, 2026-11-08):** `agentd/src/bin/agentd-broker.rs`, root with no capabilities or network, socket-activated.
+  Policy is compiled in: `service.status` and `service.restart` on `cron`, `systemd-timesyncd` (automatic) and `NetworkManager` (needs approval, 60 s, default no).
+  `/run/agentd-broker.sock` is group `agentd-broker` (agentd only); `/run/agentd-approve.sock` is group `agentd-users` (console only), so agentd cannot approve.
+  Planner action: Tier 2 `broker`; agentd checks only its shape, and a broker failure ends the task without a replan. Audit: `/var/log/agentd-broker/audit.jsonl`.
+  Test: `tests/test-debian-vm.sh`. An upgrade with a `prerm` older than this one stops the kiosk: afterwards run `systemctl disable --now getty@tty1 && systemctl restart agentos-kiosk`.
 - **Debug link (opt-in, never in the image):** `scripts/debug-server.py card <FAT path>` puts `agentos-debug.env` on a card;
   `serve` on the laptop then receives the journal in `build/debug/pi.log`, and `send '<cmd>'` runs a command on the Pi as root.
   TLS is pinned to the server's key (works with a wrong clock) plus a token. Delete the file from the card to turn it off.

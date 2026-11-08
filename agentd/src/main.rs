@@ -253,6 +253,11 @@ fn parse_response(r: &Value) -> Res<(String, Vec<Directive>)> {
     Ok((task, ds))
 }
 
+/// A read's output depends on the system, and the broker verifies its own operations, so neither can be predicted.
+fn unpredictable(d: &Directive) -> bool {
+    d.action == "read" || d.action == "broker"
+}
+
 /// Schema and policy for one directive: tier/action pairing, allow-listed targets, every required param, a
 /// postcondition, known preconditions, and "$N" references only to earlier steps.
 fn check_directive(d: &Directive) -> Result<(), String> {
@@ -264,6 +269,8 @@ fn check_directive(d: &Directive) -> Result<(), String> {
         (2, "pipe") => EXEC_ALLOW.contains(&d.target.as_str()) && strs(&["stdin"])
             && p.get("args").and_then(Value::as_array).is_some_and(|a| a.len() <= 16 && a.iter().all(Value::is_string)),
         (2, "read") => READ_TOOLS.iter().any(|(t, _)| *t == d.target),
+        // Shape only: what may actually happen is decided by agentd-broker, on its own.
+        (2, "broker") => !d.target.is_empty() && p.get("args").and_then(Value::as_array).is_some_and(|a| a.len() == 1 && a[0].is_string()),
         (1, "ffi_call") => d.target == FFI_LIB && FFI_ALLOW.contains(&p.get("symbol").and_then(Value::as_str).unwrap_or_default())
             && strs(&["input"]),
         _ => false,
@@ -271,7 +278,7 @@ fn check_directive(d: &Directive) -> Result<(), String> {
     if !ok {
         return Err(format!("tier {} {:?} on {:?} is not an allowed action with its params", d.tier, d.action, d.target));
     }
-    if d.step == 0 || (d.action != "read" && d.post.get("output").is_none()) {
+    if d.step == 0 || (!unpredictable(d) && d.post.get("output").is_none()) {
         return Err("step must be >= 1 with an expected_postcondition.output".into());
     }
     if let Some(n) = p.values().filter_map(step_ref).find(|n| *n >= d.step) {
@@ -323,7 +330,38 @@ fn ffi(lib: &str, sym: &str, input: &str) -> Res<u32> {
 
 /// Pre-action validation, tier dispatch, post-action verification. Returns (output, latency ms of the
 /// action); Err starts with the failing stage.
-fn run_step(d: &Directive, ui: &mut Option<(String, Connection, Node)>, outs: &HashMap<u64, Value>) -> Result<(Value, f64), String> {
+/// Sends one operation to agentd-broker and waits for its verdict. Returns early on the emergency stop: dropping the
+/// connection is what tells the broker not to start.
+fn broker_call(d: &Directive, tty: &mut dyn Write) -> Res<String> {
+    let unit = d.params["args"][0].as_str().ok_or("params.args[0] is not a string")?;
+    let mut c = UnixStream::connect(BROKER_SOCK).map_err(|e| format!("the system broker is not reachable: {e}"))?;
+    c.set_read_timeout(Some(Duration::from_millis(200)))?;
+    writeln!(c, "{}", json!({"op": d.target, "unit": unit, "task_id": d.task_id, "step": d.step}))?;
+    let (end, mut got, mut chunk) = (Instant::now() + BROKER_WAIT, Vec::new(), [0u8; 4096]);
+    loop {
+        stopped()?;
+        if Instant::now() >= end {
+            return Err("the system broker did not answer in time".into());
+        }
+        match c.read(&mut chunk) {
+            Ok(0) => return Err("the system broker closed the connection".into()),
+            Ok(n) => got.extend_from_slice(&chunk[..n]),
+            Err(e) if matches!(e.kind(), std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut | std::io::ErrorKind::Interrupted) => {}
+            Err(e) => return Err(e.into()),
+        }
+        while let Some(i) = got.iter().position(|b| *b == b'\n') {
+            let v: Value = serde_json::from_slice(&got[..i])?;
+            got.drain(..=i);
+            match v["status"].as_str().unwrap_or_default() {
+                "approval_required" => emit(tty, "APPROVAL_REQUIRED", &[("task_id", json!(d.task_id)), ("step", json!(d.step)), ("id", v["id"].clone())]),
+                "ok" => return Ok(v["output"].as_str().ok_or("the broker's answer has no output")?.to_string()),
+                s => return Err(format!("broker {s}: {}", v["reason"].as_str().unwrap_or("no reason given")).into()),
+            }
+        }
+    }
+}
+
+fn run_step(d: &Directive, ui: &mut Option<(String, Connection, Node)>, outs: &HashMap<u64, Value>, tty: &mut dyn Write) -> Result<(Value, f64), String> {
     if let Some(p) = d.pre["path_exists"].as_str() && !Path::new(p).exists() {
         return Err(format!("precondition: {p} does not exist"));
     }
@@ -350,6 +388,7 @@ fn run_step(d: &Directive, ui: &mut Option<(String, Connection, Node)>, outs: &H
     let out = (|| -> Res<Value> {
         Ok(match d.tier {
             3 => { let (_, c, n) = ui.as_ref().unwrap(); json!(set_text(c, n, &param(d, "text", outs)?)?) }
+            2 if d.action == "broker" => json!(broker_call(d, tty)?),
             2 if d.action == "read" => {
                 let (t, args) = READ_TOOLS.iter().find(|(t, _)| *t == d.target).ok_or(format!("{} is not an allowed read tool", d.target))?;
                 let mut argv = vec![*t];
@@ -369,7 +408,7 @@ fn run_step(d: &Directive, ui: &mut Option<(String, Connection, Node)>, outs: &H
     })().map_err(|e| format!("execute: {e}"))?;
     let lat = ms(t);
     // A read's output cannot be predicted (the time, free space), so its check is a clean exit with something to show.
-    if d.action == "read" {
+    if unpredictable(d) {
         if out.as_str().is_none_or(str::is_empty) {
             return Err("postcondition: the tool printed nothing".into());
         }
@@ -397,7 +436,7 @@ fn workflow(tty: &mut dyn Write, intent: &Value, model: &Value, source: &str,
                                ("steps", json!(plan.len())), ("source", json!(source))]);
     let (mut outs, mut ui, mut repairs, mut err) = (HashMap::new(), None, 0, None);
     while let Some(d) = plan.pop_front() {
-        match run_step(&d, &mut ui, &outs) {
+        match run_step(&d, &mut ui, &outs, tty) {
             Ok((out, lat)) => {
                 emit(tty, "STEP_VERIFIED", &[tid(), ("step", json!(d.step)), ("tier", json!(d.tier)), ("action", json!(d.action)),
                                              ("status", json!("ok")), ("output", out.clone()), ("latency_ms", json!(lat))]);
@@ -406,6 +445,11 @@ fn workflow(tty: &mut dyn Write, intent: &Value, model: &Value, source: &str,
             // An emergency stop is never repaired around.
             Err(reason) if STOPPED.load(SeqCst) => {
                 err = Some(format!("{STOP_MSG}; step {}: {reason}", d.step));
+                break;
+            }
+            // Neither is the broker's answer: after a no, the model does not get to ask again.
+            Err(reason) if d.action == "broker" => {
+                err = Some(format!("step {}: {reason}", d.step));
                 break;
             }
             Err(reason) => {
@@ -774,6 +818,11 @@ fn ms(t: Instant) -> f64 {
 /// Owned by agentd.socket (0660, group agentd-users; "agentd" is DynamicUser's own name). It outlives agentd
 /// restarts, so requests queue instead of failing.
 const SOCK: &str = "/run/agentd.sock";
+/// agentd may open this one (group agentd-broker); only the console may open the approval socket (group agentd-users).
+const BROKER_SOCK: &str = "/run/agentd-broker.sock";
+const APPROVE_SOCK: &str = "/run/agentd-approve.sock";
+/// Longer than the broker can take: 5 s to read, 60 s for a person, 30 s to restart, 5 s for each status check.
+const BROKER_WAIT: Duration = Duration::from_secs(110);
 const GEMINI_URL: &str = "https://generativelanguage.googleapis.com/v1beta/models";
 /// systemd-timesyncd creates this once the clock has really been set this boot.
 const TIME_SYNCED: &str = "/run/systemd/timesync/synchronized";
@@ -784,7 +833,7 @@ const MODEL_DEFAULT: &str = "gemini-3.5-flash-lite,gemini-3.1-flash-lite,gemini-
 /// The planner contract. The model only proposes: parse_response/check_directive decide what runs.
 const PLANNER_PROMPT: &str = r#"You plan tasks for agentd, the agent of an OS. Reply with JSON only:
 {"task_id": "<short-kebab-id>", "directives": [<directive>, ...]}
-Two actions are available on this system. To transform text:
+Three actions are available on this system. To transform text:
 {"task_id": "<same id>", "step": <1, 2, ...>, "tier": 2, "action": "pipe", "target": "/usr/bin/tr",
  "params": {"args": [<tr arguments, strings>], "stdin": "<text>" or "$N" for step N's output},
  "validation": {"expected_role": null, "precondition_state": {"path_exists": "/usr/bin/tr"},
@@ -796,10 +845,17 @@ To read something from this system, where the tool is the only thing you choose:
 Tools: /usr/bin/date (date and time), /usr/bin/uname (kernel and machine), /usr/bin/df (disk space), /usr/bin/uptime (time
 running and load), /usr/bin/free (memory). Use $N to transform a read's output in a later step; if you cannot know the exact
 result, the failed check will tell you the real output and you can reply with a corrected step.
+To check or restart a service, ask the system broker, which makes the final decision. The target is "service.status" or
+"service.restart" and the only argument is the full unit name:
+{"task_id": "<same id>", "step": <1, 2, ...>, "tier": 2, "action": "broker", "target": "service.restart", "params": {"args": ["cron.service"], "stdin": ""},
+ "validation": {"expected_role": null, "precondition_state": {}, "expected_postcondition": {"output": ""}}}
+Units: cron.service, systemd-timesyncd.service, NetworkManager.service. The broker asks the person when approval is needed, so
+do not ask first. Any other service is unsupported.
 If the message is conversation, or a question you can answer without touching this system, reply
 {"task_id": "chat", "reply": "<your answer, in plain text>", "directives": []}
 If it asks for something on this system that these actions cannot do, reply {"task_id": "unsupported", "unsupported": "<why>", "directives": []}."#;
 const MAX_REQUEST: u64 = 4096;
+const APPROVE_WAIT_MS: i32 = 60_000;
 
 /// Gemini's responseSchema for PLANNER_PROMPT, so replies come in the directive shape; check_directive still decides.
 fn planner_schema() -> Value {
@@ -1003,6 +1059,7 @@ fn describe(v: &Value) -> Option<String> {
         "CHAT_REPLY" => format!("{}: {}", s("model"), s("text").chars().filter(|c| !c.is_control() || *c == '\n').collect::<String>()),
         "TASK_COMPLETE" if v["chat"] == true => return None,
         "TASK_START" => format!("Plan: {} step(s); each one is checked before it counts.", v["steps"]),
+        "STEP_VERIFIED" if v["action"] == "broker" => format!("  ok  step {}: {} (verified)", v["step"], s("output")),
         "STEP_VERIFIED" if v["action"] == "read" => format!("  ok  step {}:\n{}", v["step"], s("output")),
         "STEP_VERIFIED" => format!("  ok  step {}: {} -> {} (verified)", v["step"], s("action"), v["output"]),
         "REPLAN_TRIGGERED" => format!("  !!  step {} failed its check: {}\n      asking for a new plan (attempt {} of {})",
@@ -1133,6 +1190,31 @@ For tasks, the agent plans, checks every step and tells you what happened.
 Today it can transform text and read the date, disk space, memory, uptime and system details.";
 
 /// The tty1 prompt: a client of the socket like `ask`, with no privileges of its own. Returns at end of input.
+/// Shows the broker's own text and passes the person's answer straight to it; agentd never sees or carries the answer.
+fn approve(v: &Value, input: &mut impl BufRead) -> Res<()> {
+    let id = v["id"].as_u64().ok_or("no request id")?;
+    let mut b = UnixStream::connect(APPROVE_SOCK)?;
+    writeln!(b, "{}", json!({"id": id}))?;
+    let mut line = String::new();
+    BufReader::new(b.try_clone()?).read_line(&mut line)?;
+    let a: Value = serde_json::from_str(&line)?;
+    let text = a["text"].as_str().ok_or("the request is no longer waiting")?;
+    println!("\nThis needs your approval:\n  {text}\nType yes to allow it. Anything else refuses, and so does no answer in 60 s.");
+    print!("approve> ");
+    std::io::stdout().flush()?;
+    // A yes typed before the question appeared must not count.
+    unsafe { libc::tcflush(0, libc::TCIFLUSH) };
+    let mut p = libc::pollfd { fd: 0, events: libc::POLLIN, revents: 0 };
+    let mut answer = String::new();
+    if unsafe { libc::poll(&mut p, 1, APPROVE_WAIT_MS) } > 0 {
+        input.read_line(&mut answer)?;
+    } else {
+        println!("\nNo answer: refused.");
+    }
+    writeln!(b, "{}", answer.trim())?;
+    Ok(())
+}
+
 fn console() -> Res<()> {
     println!("CUA-AgentOS\n{HELP}");
     let mut input = std::io::stdin().lock();
@@ -1156,7 +1238,11 @@ fn console() -> Res<()> {
             Ok(mut c) => {
                 writeln!(c, "{}", req.replace('\n', " "))?;
                 for l in BufReader::new(c).lines() {
-                    if let Some(t) = serde_json::from_str(&l?).ok().and_then(|v| describe(&v)) {
+                    let Ok(v) = serde_json::from_str::<Value>(&l?) else { continue };
+                    if v["event"] == "APPROVAL_REQUIRED" && let Err(e) = approve(&v, &mut input) {
+                        println!("Could not ask for your approval ({e}), so it will be refused.");
+                    }
+                    if let Some(t) = describe(&v) {
                         println!("{t}");
                     }
                 }
@@ -1262,6 +1348,27 @@ mod tests {
         json!({"candidates": [{"content": {"parts": [{"text": json!({"task_id": "x", "directives": ds}).to_string()}]}}]})
     }
 
+    fn broker_plan(args: Value) -> Value {
+        let d = json!({"task_id": "x", "step": 1, "tier": 2, "action": "broker", "target": "service.restart",
+            "params": {"args": args, "stdin": ""}, "validation": {"expected_postcondition": {"output": ""}}});
+        let text = json!({"task_id": "x", "directives": [d]}).to_string();
+        json!({"candidates": [{"content": {"parts": [{"text": text}]}}]})
+    }
+
+    #[test]
+    fn broker_directive_is_shape_checked_and_its_failure_is_final() {
+        assert!(parse_response(&broker_plan(json!(["cron.service"]))).is_ok());
+        assert!(parse_response(&broker_plan(json!([]))).is_err());
+        assert!(parse_response(&broker_plan(json!(["a", "b"]))).is_err());
+        assert!(parse_response(&broker_plan(json!([5]))).is_err());
+        // No broker socket exists here, so the step fails; the model must not be asked for another try.
+        let (mut asked, mut out) = (0, Vec::new());
+        let plan = broker_plan(json!(["cron.service"]));
+        let ok = workflow(&mut out, &json!("restart"), &json!("m"), "test", |_| { asked += 1; Some(Ok(plan.clone())) }).unwrap();
+        let out = String::from_utf8(out).unwrap();
+        assert!(!ok && asked == 1 && !out.contains("REPLAN_TRIGGERED"), "{out}");
+    }
+
     #[test]
     fn fixture_parses_and_schema_is_enforced() {
         let fx: Value = serde_json::from_str(include_str!("../../tests/fixtures/gemini_plan.json")).unwrap();
@@ -1343,7 +1450,7 @@ mod tests {
             "params": {"args": ["+INJECTED"], "stdin": ""}, "validation": {"expected_postcondition": {"output": "wrong"}}});
         let r = json!({"candidates": [{"content": {"parts": [{"text": json!({"task_id": "x", "directives": [d]}).to_string()}]}}]});
         let (_, ds) = parse_response(&r).unwrap();
-        let (out, _) = run_step(&ds[0], &mut None, &HashMap::new()).unwrap();
+        let (out, _) = run_step(&ds[0], &mut None, &HashMap::new(), &mut Vec::new()).unwrap();
         assert!(!out.as_str().unwrap().is_empty() && !out.as_str().unwrap().contains("INJECTED"));
     }
 

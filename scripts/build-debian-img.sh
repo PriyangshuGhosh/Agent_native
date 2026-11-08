@@ -63,7 +63,7 @@ echo "$SOURCES" | mmdebstrap --mode=unshare --arch="$ARCH" --quiet $KEYRINGS --i
 		for v in \$(ls /lib/modules); do /usr/libexec/agentos/update-boot \$v; done
 		useradd -m -G agentd-users,video,render,input -s /usr/sbin/nologin agentos
 		if [ -n \"\$ROOT_PASSWORD_HASH\" ]; then usermod -p \"\$ROOT_PASSWORD_HASH\" root; else passwd -q -l root; fi
-		systemctl -q enable agentd.socket agentd.service agentos-kiosk.service agentos-key-import.service \\
+		systemctl -q enable agentd.socket agentd.service agentd-broker.socket agentd-approve.socket agentos-kiosk.service agentos-key-import.service \\
 			agentos-bootlog.timer agentos-debug.service NetworkManager.service systemd-timesyncd.service
 		systemctl -q disable getty@tty1.service
 		echo agentos >/etc/hostname
