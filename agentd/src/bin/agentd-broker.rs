@@ -1,7 +1,11 @@
 //! agentd-broker: the only part of agentd's stack that may change the system (agentd/debian/agentd-broker.service).
 //! agentd proposes typed operations on one socket; a person answers approvals on another, which agentd cannot open.
 //! The policy is compiled in, so nothing the model says can rewrite it. Contract: tests/test-debian-vm.sh.
+#[path = "../txn.rs"]
+mod txn;
 use serde_json::{Value, json};
+use std::path::Path;
+use txn::{Journal, end_txn, recover, rollback, snapshot, staged_put};
 use std::collections::HashMap;
 use std::fs::{self, OpenOptions};
 use std::io::{BufRead, BufReader, Read, Write};
@@ -14,6 +18,16 @@ use std::thread::sleep;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 const AUDIT: &str = "/var/log/agentd-broker/audit.jsonl";
+/// StateDirectory=agentd-broker. The write-ahead journal of the open transaction lives here, so a crash or a power
+/// cut mid-change is undone at the next start (--recover runs that before anything else at boot).
+const TXN: &str = "/var/lib/agentd-broker/txn";
+/// The one file config.set_ntp owns: ReadWritePaths in the unit makes its directory, and only it, writable.
+const NTP_CONF: &str = "/etc/systemd/timesyncd.conf.d/50-agentd-ntp.conf";
+const TIMESYNCD: &str = "systemd-timesyncd.service";
+const SYSTEMCTL: &str = "/usr/bin/systemctl";
+const TIMEDATECTL: &str = "/usr/bin/timedatectl";
+/// Compiled in like UNITS: the model picks from this list or the request is rejected.
+static NTP_SERVERS: [&str; 4] = ["time.cloudflare.com", "time.google.com", "pool.ntp.org", "in.pool.ntp.org"];
 const AUDIT_MAX_BYTES: u64 = 5_000_000;
 const MAX_REQUEST: usize = 4096;
 const READ_TIMEOUT: Duration = Duration::from_secs(5);
@@ -43,44 +57,62 @@ static UNITS: [Unit; 3] = [
 enum Op {
     Status,
     Restart,
+    /// Point systemd-timesyncd at one of NTP_SERVERS: the only operation that changes a file.
+    SetNtp,
 }
 
 struct Req {
     op: Op,
     unit: &'static Unit,
+    /// The allowlisted server for SetNtp: a &'static str, so no byte of the request is ever written or run.
+    value: Option<&'static str>,
     task_id: String,
     step: u64,
 }
 
 impl Req {
+    /// Only a restart needs one: SetNtp is reversible, verified, and limited to the compiled-in server list.
     fn approval(&self) -> Option<&'static str> {
         if self.op == Op::Restart { self.unit.approval } else { None }
     }
     fn detail(&self) -> Value {
-        json!({"op": format!("{:?}", self.op), "unit": self.unit.name, "task_id": self.task_id, "step": self.step})
+        json!({"op": format!("{:?}", self.op), "unit": self.unit.name, "value": self.value,
+               "task_id": self.task_id, "step": self.step})
     }
 }
 
-/// Exactly four fields of exactly these types, naming an operation and a unit from the table.
+/// Exactly these fields of exactly these types, naming an operation, a unit from the table and (for set_ntp) a
+/// server from the list.
 fn parse(line: &str) -> Result<Req, String> {
     let v: Value = serde_json::from_str(line).map_err(|_| "not valid JSON")?;
     let o = v.as_object().ok_or("not a JSON object")?;
-    if o.len() != 4 || !["op", "unit", "task_id", "step"].iter().all(|k| o.contains_key(*k)) {
-        return Err("fields must be exactly op, unit, task_id and step".into());
-    }
-    let op = match o["op"].as_str() {
+    let op = match o.get("op").and_then(Value::as_str) {
         Some("service.status") => Op::Status,
         Some("service.restart") => Op::Restart,
+        Some("config.set_ntp") => Op::SetNtp,
         _ => return Err("unknown operation".into()),
     };
+    let fields: &[&str] = match op {
+        Op::SetNtp => &["op", "unit", "task_id", "step", "value"],
+        _ => &["op", "unit", "task_id", "step"],
+    };
+    if o.len() != fields.len() || !fields.iter().all(|k| o.contains_key(*k)) {
+        return Err(format!("fields must be exactly {}", fields.join(", ")));
+    }
     let name = o["unit"].as_str().ok_or("unit is not a string")?;
     let unit = UNITS.iter().find(|u| u.name == name).ok_or("unit is not on the allowlist")?;
+    let value = match op {
+        Op::SetNtp if unit.name != TIMESYNCD => return Err(format!("config.set_ntp applies to {TIMESYNCD}")),
+        Op::SetNtp => Some(*NTP_SERVERS.iter().find(|s| Some(**s) == o["value"].as_str())
+            .ok_or("that time server is not on the allowlist")?),
+        _ => None,
+    };
     let task_id = o["task_id"].as_str().ok_or("task_id is not a string")?;
     if task_id.is_empty() || task_id.len() > 64 || !task_id.bytes().all(|b| b.is_ascii_alphanumeric() || b"-_".contains(&b)) {
         return Err("bad task_id".into());
     }
     let step = o["step"].as_u64().ok_or("step is not a number")?;
-    Ok(Req { op, unit, task_id: task_id.to_string(), step })
+    Ok(Req { op, unit, value, task_id: task_id.to_string(), step })
 }
 
 /// Forgets restarts older than the window; true if another would exceed the limit.
@@ -126,10 +158,12 @@ fn reply(mut c: &UnixStream, v: &Value) {
     let _ = writeln!(c, "{v}");
 }
 
-/// Fixed binary, empty environment, bounded time. Unit names come from UNITS, never from a request.
-fn systemctl(args: &[&str], limit: Duration) -> Result<String, String> {
-    let mut child = Command::new("/usr/bin/systemctl").args(args).env_clear().stdin(Stdio::null()).stdout(Stdio::piped())
-        .stderr(Stdio::null()).spawn().map_err(|e| format!("cannot run systemctl: {e}"))?;
+/// Fixed binaries, empty environment, bounded time. Every argument comes from this file, never from a request.
+fn run(argv: &[&str], limit: Duration) -> Result<String, String> {
+    // The command name alone: these messages are read by a person on the screen.
+    let what = format!("{} {}", argv[0].rsplit('/').next().unwrap_or_default(), argv[1]);
+    let mut child = Command::new(argv[0]).args(&argv[1..]).env_clear().stdin(Stdio::null()).stdout(Stdio::piped())
+        .stderr(Stdio::null()).spawn().map_err(|e| format!("cannot run {what}: {e}"))?;
     let end = Instant::now() + limit;
     loop {
         match child.try_wait().map_err(|e| e.to_string())? {
@@ -138,11 +172,11 @@ fn systemctl(args: &[&str], limit: Duration) -> Result<String, String> {
                 child.stdout.take().ok_or("no output")?.read_to_string(&mut out).map_err(|e| e.to_string())?;
                 return Ok(out);
             }
-            Some(s) => return Err(format!("systemctl {} failed: {s}", args[0])),
+            Some(s) => return Err(format!("{what} failed: {s}")),
             None if Instant::now() >= end => {
                 let _ = child.kill();
                 let _ = child.wait();
-                return Err(format!("systemctl {} timed out", args[0]));
+                return Err(format!("{what} timed out"));
             }
             None => sleep(Duration::from_millis(20)),
         }
@@ -150,7 +184,7 @@ fn systemctl(args: &[&str], limit: Duration) -> Result<String, String> {
 }
 
 fn show(unit: &str) -> Result<HashMap<String, String>, String> {
-    let out = systemctl(&["show", "--property=LoadState,ActiveState,SubState,ActiveEnterTimestampMonotonic", "--", unit], SHOW_TIMEOUT)?;
+    let out = run(&[SYSTEMCTL, "show", "--property=LoadState,ActiveState,SubState,ActiveEnterTimestampMonotonic", "--", unit], SHOW_TIMEOUT)?;
     Ok(out.lines().filter_map(|l| l.split_once('=')).map(|(k, v)| (k.to_string(), v.to_string())).collect())
 }
 
@@ -162,17 +196,77 @@ fn stamp(m: &HashMap<String, String>) -> u64 {
     field(m, "ActiveEnterTimestampMonotonic").parse().unwrap_or(0)
 }
 
+/// What systemd-timesyncd itself says it loaded, which is how a config change is confirmed: the file we wrote is
+/// not evidence that the daemon read it.
+fn loaded_ntp() -> Result<String, String> {
+    let out = run(&[TIMEDATECTL, "show-timesync", "--property=SystemNTPServers", "--value"], SHOW_TIMEOUT)?;
+    Ok(out.trim().to_string())
+}
+
+/// Rolls back a transaction a crash or power cut left open. Returns Err only if the state is still uncertain.
+fn recover_open_txn(peer: u32) -> Result<(), String> {
+    match recover(Path::new(TXN)) {
+        Ok(None) => Ok(()),
+        Ok(Some((_, j))) => {
+            let paths: Vec<String> = j.iter().map(|(p, _)| p.display().to_string()).collect();
+            let restored = j.iter().all(|(p, prior)| snapshot(p) == *prior);
+            let _ = audit("recovered", peer, json!({"paths": paths, "restored": restored}));
+            // The restored file may differ from what a running daemon loaded; if it is not running, this does nothing.
+            let _ = run(&[SYSTEMCTL, "try-restart", "--no-ask-password", "--", TIMESYNCD], RESTART_TIMEOUT);
+            if restored { Ok(()) } else { Err("a previous change could not be undone".into()) }
+        }
+        Err(e) => {
+            let _ = audit("recovery_failed", peer, json!({"reason": e.to_string()}));
+            Err(format!("an interrupted change could not be undone: {e}"))
+        }
+    }
+}
+
+/// Writes the one drop-in this broker owns as a journalled transaction, restarts systemd-timesyncd and checks what
+/// the daemon loaded. Anything short of that is rolled back to the previous bytes and mode, and reported as such.
+fn set_ntp(server: &str, peer: u32) -> Result<String, String> {
+    recover_open_txn(peer)?;
+    let txn = Path::new(TXN);
+    let body = format!("# Written by agentd-broker (config.set_ntp). Delete this file for the default servers.\n[Time]\nNTP={server}\n");
+    let mut j: Journal = Vec::new();
+    let done = (|| -> Result<String, String> {
+        staged_put(&mut j, txn, Path::new(NTP_CONF), body.as_bytes(), 0o644).map_err(|e| format!("cannot write {NTP_CONF}: {e}"))?;
+        run(&[SYSTEMCTL, "restart", "--no-ask-password", "--", TIMESYNCD], RESTART_TIMEOUT)?;
+        let loaded = loaded_ntp()?;
+        if !loaded.split_whitespace().any(|s| s == server) {
+            return Err(format!("systemd-timesyncd loaded {loaded:?} instead"));
+        }
+        end_txn(txn).map_err(|e| format!("cannot close the transaction: {e}"))?; // commit
+        Ok(format!("systemd-timesyncd now lists {server} as a time server (it confirms it, {loaded:?})."))
+    })();
+    let why = match done {
+        Ok(out) => return Ok(out),
+        Err(why) => why,
+    };
+    let undone = rollback(&j).and_then(|_| end_txn(txn));
+    let _ = run(&[SYSTEMCTL, "try-restart", "--no-ask-password", "--", TIMESYNCD], RESTART_TIMEOUT);
+    let clean = undone.is_ok() && j.iter().all(|(p, prior)| snapshot(p) == *prior);
+    let _ = audit("rolled_back", peer, json!({"unit": TIMESYNCD, "value": server, "reason": why, "clean": clean}));
+    Err(if clean {
+        format!("could not set the time server to {server}: {why}. The previous setting is back.")
+    } else {
+        format!("could not set the time server to {server}: {why}, and undoing it also failed ({})", undone.err().map_or("the file does not match what it was".into(), |e| e.to_string()))
+    })
+}
+
 /// Precondition: the unit is loaded. Postcondition of a restart: it is active again, with a newer start time.
-fn execute(r: &Req) -> Result<String, String> {
+fn execute(r: &Req, peer: u32) -> Result<String, String> {
     let name = r.unit.name;
     let before = show(name)?;
     if field(&before, "LoadState") != "loaded" {
         return Err(format!("{name} is not loaded on this system"));
     }
-    if r.op == Op::Status {
-        return Ok(format!("{name} is {} ({})", field(&before, "ActiveState"), field(&before, "SubState")));
+    match r.op {
+        Op::Status => return Ok(format!("{name} is {} ({})", field(&before, "ActiveState"), field(&before, "SubState"))),
+        Op::SetNtp => return set_ntp(r.value.ok_or("no server")?, peer),
+        Op::Restart => {}
     }
-    systemctl(&["restart", "--no-ask-password", "--", name], RESTART_TIMEOUT)?;
+    run(&[SYSTEMCTL, "restart", "--no-ask-password", "--", name], RESTART_TIMEOUT)?;
     let after = show(name)?;
     if field(&after, "ActiveState") != "active" || stamp(&after) <= stamp(&before) {
         return Err(format!("{name} did not come back: it is {}", field(&after, "ActiveState")));
@@ -246,7 +340,7 @@ fn handle(c: UnixStream, s: &Shared, next_id: &mut u64, restarts: &mut HashMap<&
     };
     let detail = r.detail();
     let now = Instant::now();
-    if r.op == Op::Restart && over_limit(restarts.entry(r.unit.name).or_default(), now) {
+    if r.op != Op::Status && over_limit(restarts.entry(r.unit.name).or_default(), now) {
         return refuse("rejected", "rejected", "this service was restarted too many times recently", detail);
     }
     if let Some(text) = r.approval() {
@@ -267,10 +361,10 @@ fn handle(c: UnixStream, s: &Shared, next_id: &mut u64, restarts: &mut HashMap<&
     if audit("started", peer, detail.clone()).is_err() {
         return reply(&c, &json!({"status": "failed", "reason": "cannot write the audit record, so nothing was done"}));
     }
-    if r.op == Op::Restart {
+    if r.op != Op::Status {
         restarts.entry(r.unit.name).or_default().push(Instant::now());
     }
-    match execute(&r) {
+    match execute(&r, peer) {
         Ok(output) => {
             let _ = audit("verified", peer, json!({"request": detail, "output": output}));
             reply(&c, &json!({"status": "ok", "output": output}));
@@ -317,10 +411,20 @@ fn sockets() -> Result<(UnixListener, UnixListener), String> {
 }
 
 fn main() {
+    // Boot (agentd-broker-recover.service): undo an interrupted change before anything can read or ask for one.
+    if std::env::args().nth(1).as_deref() == Some("--recover") {
+        if let Err(e) = recover_open_txn(0) {
+            eprintln!("agentd-broker: {e}");
+            std::process::exit(1);
+        }
+        return;
+    }
     let (agent, approve) = sockets().unwrap_or_else(|e| {
         eprintln!("agentd-broker: {e}");
         std::process::exit(1);
     });
+    // Socket activation after a crash: the same recovery, before the first request is answered.
+    let _ = recover_open_txn(0);
     let shared = Arc::new(Shared::default());
     let s = shared.clone();
     std::thread::spawn(move || approve.incoming().flatten().for_each(|c| answer(c, &s)));
@@ -337,11 +441,35 @@ mod tests {
         json!({"op": op, "unit": unit, "task_id": "t-1", "step": 1}).to_string()
     }
 
+    fn ntp(value: Value) -> String {
+        json!({"op": "config.set_ntp", "unit": TIMESYNCD, "task_id": "t-1", "step": 1, "value": value}).to_string()
+    }
+
     #[test]
     fn accepts_only_the_table() {
         for u in &UNITS {
             assert_eq!(parse(&req("service.status", u.name)).unwrap().op, Op::Status);
             assert_eq!(parse(&req("service.restart", u.name)).unwrap().op, Op::Restart);
+        }
+    }
+
+    #[test]
+    fn set_ntp_takes_only_a_server_from_the_list_on_timesyncd() {
+        for server in &NTP_SERVERS {
+            let r = parse(&ntp(json!(server))).unwrap();
+            assert_eq!(r.op, Op::SetNtp);
+            assert_eq!(r.value, Some(*server));
+            assert!(r.approval().is_none(), "set_ntp is automatic");
+        }
+        let bad = [
+            ntp(json!("ntp.example.com")), ntp(json!("")), ntp(json!("time.cloudflare.com ")), ntp(json!("TIME.GOOGLE.COM")),
+            ntp(json!("pool.ntp.org\n[Time]\nNTP=evil")), ntp(json!(["pool.ntp.org"])), ntp(json!(null)), ntp(json!(1)),
+            req("config.set_ntp", TIMESYNCD), // no value
+            json!({"op": "config.set_ntp", "unit": "cron.service", "task_id": "t", "step": 1, "value": "pool.ntp.org"}).to_string(),
+            json!({"op": "config.set_ntp", "unit": TIMESYNCD, "task_id": "t", "step": 1, "value": "pool.ntp.org", "x": 1}).to_string(),
+        ];
+        for b in &bad {
+            assert!(parse(b).is_err(), "accepted {b}");
         }
     }
 

@@ -1,0 +1,39 @@
+[Unit]
+Description=CUA-AgentOS broker: roll back a transaction left open by a crash
+# Before anything reads what a cut-short transaction half-wrote, and before any new work can ask for one.
+Before=systemd-timesyncd.service agentd-broker.socket agentd.socket
+DefaultDependencies=no
+After=local-fs.target
+Conflicts=shutdown.target
+Before=shutdown.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/libexec/agentd-broker --recover
+StateDirectory=agentd-broker
+StateDirectoryMode=0700
+LogsDirectory=agentd-broker
+LogsDirectoryMode=0750
+ReadWritePaths=-/etc/systemd/timesyncd.conf.d
+CapabilityBoundingSet=
+NoNewPrivileges=yes
+PrivateNetwork=yes
+RestrictAddressFamilies=AF_UNIX
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+RestrictNamespaces=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallArchitectures=native
+MemoryMax=64M
+TasksMax=16
+
+[Install]
+WantedBy=sysinit.target

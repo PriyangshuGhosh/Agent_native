@@ -23,7 +23,8 @@ install -m 755 "$B/target/$T/release/agentd" "$P/usr/bin/agentd"
 install -D -m 755 "$B/target/$T/release/agentd-broker" "$P/usr/libexec/agentd-broker"
 install -m 644 "$ROOT/agentd/debian/agentd.service" "$ROOT/agentd/debian/agentd-console.service" \
 	"$ROOT/agentd/debian/agentd.socket" "$ROOT/agentd/debian/agentd-broker.service" \
-	"$ROOT/agentd/debian/agentd-broker.socket" "$ROOT/agentd/debian/agentd-approve.socket" "$P/usr/lib/systemd/system/"
+	"$ROOT/agentd/debian/agentd-broker.socket" "$ROOT/agentd/debian/agentd-approve.socket" \
+	"$ROOT/agentd/debian/agentd-broker-recover.service" "$P/usr/lib/systemd/system/"
 install -m 755 "$ROOT/agentd/debian/postinst" "$ROOT/agentd/debian/prerm" "$ROOT/agentd/debian/postrm" "$P/DEBIAN/"
 chmod 700 "$P/etc/agentd" # gemini.env goes here; the key never ships in the package
 cat >"$P/DEBIAN/control" <<CTL

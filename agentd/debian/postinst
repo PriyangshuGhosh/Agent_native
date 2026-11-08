@@ -3,11 +3,13 @@ set -e
 if [ "$1" = configure ]; then
 	getent group agentd-users >/dev/null || groupadd --system agentd-users
 	getent group agentd-broker >/dev/null || groupadd --system agentd-broker
+	# The one config tree config.set_ntp writes; the broker's unit makes it writable, so it must exist first.
+	install -d -m 755 /etc/systemd/timesyncd.conf.d
 fi
 if [ "$1" = configure ] && [ -d /run/systemd/system ]; then
 	systemctl daemon-reload
-	systemctl enable agentd.socket agentd.service agentd-broker.socket agentd-approve.socket
-	systemctl start agentd.socket agentd-broker.socket agentd-approve.socket
+	systemctl enable agentd.socket agentd.service agentd-broker.socket agentd-approve.socket agentd-broker-recover.service
+	systemctl start agentd-broker-recover.service agentd.socket agentd-broker.socket agentd-approve.socket
 	systemctl try-restart agentd-broker.service
 	if [ -e /usr/lib/systemd/system/agentos-kiosk.service ]; then
 		# The image's kiosk owns tty1, and starting the text console would stop it.

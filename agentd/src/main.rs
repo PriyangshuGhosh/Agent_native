@@ -14,7 +14,6 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::fs::{self, File, OpenOptions};
 use std::io::{BufRead, BufReader, Read, Write};
 use std::os::fd::{AsFd, FromRawFd};
-use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::os::unix::process::CommandExt;
 use std::path::{Component, Path, PathBuf};
@@ -25,6 +24,9 @@ use std::thread::sleep;
 use std::time::{Duration, Instant};
 use zbus::blocking::{Connection, connection::Builder};
 use zbus::zvariant::{DynamicType, OwnedObjectPath, OwnedValue};
+
+mod txn;
+use txn::{Journal, end_txn, put, recover, rollback, snapshot, staged_put};
 
 type Res<T> = Result<T, Box<dyn std::error::Error>>;
 /// An AT-SPI accessible: (bus name, object path).
@@ -269,8 +271,9 @@ fn check_directive(d: &Directive) -> Result<(), String> {
         (2, "pipe") => EXEC_ALLOW.contains(&d.target.as_str()) && strs(&["stdin"])
             && p.get("args").and_then(Value::as_array).is_some_and(|a| a.len() <= 16 && a.iter().all(Value::is_string)),
         (2, "read") => READ_TOOLS.iter().any(|(t, _)| *t == d.target),
-        // Shape only: what may actually happen is decided by agentd-broker, on its own.
-        (2, "broker") => !d.target.is_empty() && p.get("args").and_then(Value::as_array).is_some_and(|a| a.len() == 1 && a[0].is_string()),
+        // Shape only: what may actually happen is decided by agentd-broker, on its own. args = [unit] or [unit, value].
+        (2, "broker") => !d.target.is_empty() && p.get("args").and_then(Value::as_array)
+            .is_some_and(|a| (1..=2).contains(&a.len()) && a.iter().all(Value::is_string)),
         (1, "ffi_call") => d.target == FFI_LIB && FFI_ALLOW.contains(&p.get("symbol").and_then(Value::as_str).unwrap_or_default())
             && strs(&["input"]),
         _ => false,
@@ -334,9 +337,13 @@ fn ffi(lib: &str, sym: &str, input: &str) -> Res<u32> {
 /// connection is what tells the broker not to start.
 fn broker_call(d: &Directive, tty: &mut dyn Write) -> Res<String> {
     let unit = d.params["args"][0].as_str().ok_or("params.args[0] is not a string")?;
+    let mut req = json!({"op": d.target, "unit": unit, "task_id": d.task_id, "step": d.step});
+    if let Some(v) = d.params["args"].get(1) {
+        req["value"] = v.clone();
+    }
     let mut c = UnixStream::connect(BROKER_SOCK).map_err(|e| format!("the system broker is not reachable: {e}"))?;
     c.set_read_timeout(Some(Duration::from_millis(200)))?;
-    writeln!(c, "{}", json!({"op": d.target, "unit": unit, "task_id": d.task_id, "step": d.step}))?;
+    writeln!(c, "{req}")?;
     let (end, mut got, mut chunk) = (Instant::now() + BROKER_WAIT, Vec::new(), [0u8; 4096]);
     loop {
         stopped()?;
@@ -493,91 +500,6 @@ const LIFECYCLE_TASK: &str = "t06-lifecycle";
 const STEP_TIMEOUT: Duration = Duration::from_secs(if cfg!(test) { 1 } else { 30 });
 /// A child's stdout beyond this is dropped (the child then blocks and meets the step cap).
 const MAX_STDOUT: u64 = 1 << 20;
-
-/// Every path a transaction touched, with its (bytes, mode) before it (None = it did not exist).
-type Journal = Vec<(PathBuf, Option<(Vec<u8>, u32)>)>;
-
-fn tmp_of(path: &Path) -> PathBuf {
-    let mut t = path.as_os_str().to_owned();
-    t.push(".agentd-tmp");
-    t.into()
-}
-
-/// Atomically and durably replaces `path`: fresh temp file, fsync, rename in the same directory, fsync the directory.
-fn put(path: &Path, data: &[u8], mode: u32) -> Res<()> {
-    let tmp = tmp_of(path);
-    let dir = path.parent().ok_or("path has no parent")?;
-    let r = (|| -> Res<()> {
-        fs::create_dir_all(dir)?;
-        let _ = fs::remove_file(&tmp);
-        // create_new (O_EXCL) never follows a planted symlink.
-        let mut f = OpenOptions::new().write(true).create_new(true).mode(0o600).open(&tmp)?;
-        f.write_all(data)?;
-        f.set_permissions(fs::Permissions::from_mode(mode))?;
-        f.sync_all()?;
-        fs::rename(&tmp, path)?;
-        Ok(File::open(dir)?.sync_all()?)
-    })();
-    if r.is_err() {
-        let _ = fs::remove_file(&tmp);
-    }
-    r
-}
-
-fn snapshot(path: &Path) -> Option<(Vec<u8>, u32)> {
-    Some((fs::read(path).ok()?, fs::metadata(path).ok()?.permissions().mode() & 0o7777))
-}
-
-/// Write-ahead: saves `path`'s prior state under `txn` (backup file + journal) before writing it, so a transaction
-/// cut short by a crash is rolled back by recover() at the next start.
-fn staged_put(j: &mut Journal, txn: &Path, path: &Path, data: &[u8], mode: u32) -> Res<()> {
-    let prior = snapshot(path);
-    if let Some((b, m)) = &prior {
-        put(&txn.join(j.len().to_string()), b, *m)?;
-    }
-    j.push((path.into(), prior));
-    let entries: Vec<(&PathBuf, bool)> = j.iter().map(|(p, prior)| (p, prior.is_some())).collect();
-    put(&txn.join("journal.json"), &serde_json::to_vec(&entries)?, 0o600)?;
-    put(path, data, mode)
-}
-
-/// Undoes a transaction, newest change first.
-fn rollback(j: &Journal) -> Res<()> {
-    for (p, prior) in j.iter().rev() {
-        match prior {
-            Some((b, m)) => put(p, b, *m)?,
-            None => fs::remove_file(p).or_else(|e| if e.kind() == std::io::ErrorKind::NotFound { Ok(()) } else { Err(e) })?,
-        }
-    }
-    Ok(())
-}
-
-/// Closes a transaction (after commit or rollback): its journal goes, durably.
-fn end_txn(txn: &Path) -> Res<()> {
-    match fs::remove_dir_all(txn) {
-        Err(e) if e.kind() != std::io::ErrorKind::NotFound => return Err(e.into()),
-        _ => {}
-    }
-    Ok(File::open(txn.parent().ok_or("txn has no parent")?)?.sync_all()?)
-}
-
-/// Rolls back a transaction a crash left open in `txn`. Returns (package, journal) if there was one.
-fn recover(txn: &Path) -> Res<Option<(String, Journal)>> {
-    let entries: Vec<(PathBuf, bool)> = match fs::read(txn.join("journal.json")) {
-        Ok(b) => serde_json::from_slice(&b)?,
-        // No journal yet: nothing outside txn was touched.
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return end_txn(txn).map(|_| None),
-        Err(e) => return Err(e.into()),
-    };
-    let j: Journal = entries.into_iter().enumerate().map(|(i, (p, had))| -> Res<_> {
-        let _ = fs::remove_file(tmp_of(&p));
-        Ok((p, if had { Some(snapshot(&txn.join(i.to_string())).ok_or("journal backup missing")?) } else { None }))
-    }).collect::<Res<_>>()?;
-    rollback(&j)?;
-    let pkg = fs::read_to_string(txn.join("package")).unwrap_or_default();
-    end_txn(txn)?;
-    Ok(Some((pkg, j)))
-}
 
 /// The registry as a JSON object; missing = empty. A corrupt registry is an error, never silently replaced.
 fn read_registry(path: &Path) -> Res<Map<String, Value>> {
@@ -851,6 +773,12 @@ To check or restart a service, ask the system broker, which makes the final deci
  "validation": {"expected_role": null, "precondition_state": {}, "expected_postcondition": {"output": ""}}}
 Units: cron.service, systemd-timesyncd.service, NetworkManager.service. The broker asks the person when approval is needed, so
 do not ask first. Any other service is unsupported.
+The same broker also sets which internet time server this system uses. The target is "config.set_ntp", the unit is always
+systemd-timesyncd.service, and the second argument is the server, which must be one of time.cloudflare.com, time.google.com,
+pool.ntp.org, in.pool.ntp.org:
+{"task_id": "<same id>", "step": <1, 2, ...>, "tier": 2, "action": "broker", "target": "config.set_ntp", "params": {"args": ["systemd-timesyncd.service", "time.cloudflare.com"], "stdin": ""},
+ "validation": {"expected_role": null, "precondition_state": {}, "expected_postcondition": {"output": ""}}}
+The broker writes the setting, restarts the service, checks what it loaded, and undoes the change if that does not match.
 If the message is conversation, or a question you can answer without touching this system, reply
 {"task_id": "chat", "reply": "<your answer, in plain text>", "directives": []}
 If it asks for something on this system that these actions cannot do, reply {"task_id": "unsupported", "unsupported": "<why>", "directives": []}."#;
@@ -1335,6 +1263,7 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use txn::tmp_of;
 
     fn tmpdir(tag: &str) -> PathBuf {
         let d = std::env::temp_dir().join(format!("agentd-test-{tag}-{}", std::process::id()));
@@ -1358,9 +1287,12 @@ mod tests {
     #[test]
     fn broker_directive_is_shape_checked_and_its_failure_is_final() {
         assert!(parse_response(&broker_plan(json!(["cron.service"]))).is_ok());
+        // [unit] or [unit, value]: the broker decides what those mean.
+        assert!(parse_response(&broker_plan(json!(["systemd-timesyncd.service", "pool.ntp.org"]))).is_ok());
         assert!(parse_response(&broker_plan(json!([]))).is_err());
-        assert!(parse_response(&broker_plan(json!(["a", "b"]))).is_err());
+        assert!(parse_response(&broker_plan(json!(["a", "b", "c"]))).is_err());
         assert!(parse_response(&broker_plan(json!([5]))).is_err());
+        assert!(parse_response(&broker_plan(json!(["a", 5]))).is_err());
         // No broker socket exists here, so the step fails; the model must not be asked for another try.
         let (mut asked, mut out) = (0, Vec::new());
         let plan = broker_plan(json!(["cron.service"]));

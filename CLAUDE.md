@@ -149,6 +149,18 @@ budgets do not apply. amd64 is tested only in a throwaway KVM guest (`-snapshot`
   `/run/agentd-broker.sock` is group `agentd-broker` (agentd only); `/run/agentd-approve.sock` is group `agentd-users` (console only), so agentd cannot approve.
   Planner action: Tier 2 `broker`; agentd checks only its shape, and a broker failure ends the task without a replan. Audit: `/var/log/agentd-broker/audit.jsonl`.
   Test: `tests/test-debian-vm.sh`. An upgrade with a `prerm` older than this one stops the kiosk: afterwards run `systemctl disable --now getty@tty1 && systemctl restart agentos-kiosk`.
+- **Transactions and recovery (chunk 5, 2026-11-08):** the broker's one modifying operation is Tier 2 `broker` with target
+  `config.set_ntp` (unit `systemd-timesyncd.service`, second argument a server from a compiled-in list of four). It writes
+  `/etc/systemd/timesyncd.conf.d/50-agentd-ntp.conf` as a journalled transaction (`agentd/src/txn.rs`, extracted from
+  `main.rs` and now shared with agentd's capability installs; journal in `StateDirectory=/var/lib/agentd-broker/txn`),
+  restarts timesyncd, and confirms the change by asking the daemon (`timedatectl show-timesync --property=SystemNTPServers`),
+  never by reading the file back. Anything short of that rolls back to the prior bytes and mode and says so. New audit
+  phases: `rolled_back` (with `clean`), `recovered`, `recovery_failed`. Recovery runs at boot
+  (`agentd-broker-recover.service`, ordered before timesyncd and both agentd sockets), at socket activation, and before
+  every `set_ntp`. No approval prompt: it is reversible, verified and limited to the compiled-in list (the user's choice,
+  2026-11-08). Test: `tests/test-txn-recovery.sh`, 14 checks on a qcow2 overlay of the Debian cloud image -- crafted
+  interruption stages, 8 SIGKILLs inside real changes, and QEMU power cuts; **the binary has no crash points**. Details
+  and limits: `docs/txn-chunk5-2026-11-08.md`. Still to do: the real power pull on the Pi 5.
 - **Debug link (opt-in, never in the image):** `scripts/debug-server.py card <FAT path>` puts `agentos-debug.env` on a card;
   `serve` on the laptop then receives the journal in `build/debug/pi.log`, and `send '<cmd>'` runs a command on the Pi as root.
   TLS is pinned to the server's key (works with a wrong clock) plus a token. Delete the file from the card to turn it off.

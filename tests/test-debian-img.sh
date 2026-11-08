@@ -17,7 +17,7 @@ umask 077
 
 cp --sparse=always "$IMG" "$S/disk.img"
 cp /usr/share/OVMF/OVMF_VARS_4M.fd "$S/vars.fd"
-EXPECT="systemd_pid1 root_locked agentd_active kiosk_on_screen input_devices typed_on_screen wifi_wrong_password
+EXPECT="systemd_pid1 root_locked agentd_active broker_ready_at_boot kiosk_on_screen input_devices typed_on_screen wifi_wrong_password
 	wifi_joined wifi_saved_root_only bootlog_on_fat timesync_on_network_up debug_wrong_pin debug_wrong_token debug_command debug_journal"
 ESP="$S/disk.img@@1M"
 export MTOOLS_SKIP_CHECK=1
@@ -50,6 +50,11 @@ console_up() { pgrep -u agentos -f '^/usr/bin/agentd console' >/dev/null; }
 [ "$(cat /proc/1/comm)" = systemd ]; check systemd_pid1 $?
 [ "$(passwd -S root | cut -d' ' -f2)" = L ]; check root_locked $?
 upto 30 systemctl is-active -q agentd; check agentd_active $?
+# The transaction recovery ran at boot and the broker is ready to be asked (chunk 5).
+[ "$(systemctl show -p Result --value agentd-broker-recover.service)" = success ] &&
+	[ "$(systemctl show -p ExecMainStatus --value agentd-broker-recover.service)" = 0 ] &&
+	systemctl is-active -q agentd-broker.socket && systemctl is-active -q agentd-approve.socket
+check broker_ready_at_boot $?
 
 upto 60 console_up; sleep 3
 cage=$(pgrep -u agentos -x cage); con=$(pgrep -u agentos -f '^/usr/bin/agentd console')

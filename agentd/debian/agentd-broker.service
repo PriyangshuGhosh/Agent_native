@@ -13,6 +13,10 @@ Restart=on-failure
 RestartSec=2
 LogsDirectory=agentd-broker
 LogsDirectoryMode=0750
+# The transaction journal (/var/lib/agentd-broker) and the one config tree config.set_ntp may write.
+StateDirectory=agentd-broker
+StateDirectoryMode=0700
+ReadWritePaths=-/etc/systemd/timesyncd.conf.d
 # Root only to be allowed to talk to systemd: no capabilities, no network, nothing writable but the audit log.
 CapabilityBoundingSet=
 NoNewPrivileges=yes

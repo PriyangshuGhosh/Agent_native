@@ -71,7 +71,7 @@ for u in cron NetworkManager systemd-timesyncd; do
 	[ "$(systemctl show -p LoadState --value $u.service)" = loaded ] || printf '[Service]\nExecStart=/bin/sleep infinity\n' >/etc/systemd/system/$u.service
 done
 systemctl daemon-reload; systemctl unmask -q systemd-timesyncd.service 2>/dev/null; systemctl start cron.service NetworkManager.service systemd-timesyncd.service
-B=/run/agentd-broker.sock AP=/run/agentd-approve.sock BC="python3 /mnt/seed/bc.py"
+B=/run/agentd-broker.sock AP=/run/agentd-approve.sock BC="python3 /mnt/seed/brokerclient.py"
 apid=$(systemctl show -p MainPID --value agentd)
 AU=$(awk '/^Uid:/{print $2}' /proc/"$apid"/status) AG=$(awk '/^Gid:/{print $2}' /proc/"$apid"/status)
 AGS=$(awk '/^Groups:/{$1=""; print}' /proc/"$apid"/status | xargs | tr ' ' ,)
@@ -135,20 +135,7 @@ fi
 [ $failed = 0 ] || { echo "dns from the guest:"; getent ahosts generativelanguage.googleapis.com | head -3; resolvectl status 2>&1 | grep -E "DNS Server|Current" ; systemctl status --no-pager agentd agentd-console; journalctl -b --no-pager -o short-monotonic -u agentd -u agentd-console -u agentd-broker | tail -40; }
 echo "GUEST_DONE"
 GUEST
-# Sends each line, showing one reply between them, then prints replies until the broker closes the connection.
-cat >"$S/bc.py" <<'PY'
-import socket, sys
-s = socket.socket(socket.AF_UNIX)
-s.connect(sys.argv[1])
-f = s.makefile()
-for i, l in enumerate(sys.argv[2:]):
-    s.sendall(l.encode() + b"\n")
-    if i + 3 < len(sys.argv):
-        print(f.readline(), end="", flush=True)
-for l in f:
-    print(l, end="", flush=True)
-PY
-xorriso -as mkisofs -quiet -V cidata -J -r -o "$S/seed.iso" "$S/user-data" "$S/meta-data" "$S/guest.sh" "$S/agentd.deb" "$S/bc.py" \
+xorriso -as mkisofs -quiet -V cidata -J -r -o "$S/seed.iso" "$S/user-data" "$S/meta-data" "$S/guest.sh" "$S/agentd.deb" "$ROOT/tests/brokerclient.py" \
 	$( [ -e "$S/gemini.env" ] && echo "$S/gemini.env" ) 2>/dev/null
 
 timeout -s KILL 300 qemu-system-x86_64 -enable-kvm -cpu host -m 2048 -smp 2 -snapshot -nographic -no-reboot \
