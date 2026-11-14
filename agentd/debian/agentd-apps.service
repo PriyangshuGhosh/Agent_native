@@ -1,0 +1,26 @@
+# The application runner: works as the person's own user (agentos) on the person's own files, with no network.
+# Each application operation additionally runs inside bubblewrap (agentd/src/apps.rs). PrivateTmp is off on purpose:
+# a live session's control socket (for example LibreOffice's pipe) lives in /tmp.
+# No ProtectKernelTunables: it overmounts parts of /proc, and then bubblewrap may not mount a fresh /proc.
+[Unit]
+Description=CUA-AgentOS application runner
+Requires=agentd-apps.socket agentd-apps-approve.socket
+After=agentd-apps.socket agentd-apps-approve.socket
+
+[Service]
+ExecStart=/usr/bin/agentd apprunner
+User=agentos
+Environment=AGENTD_WORKSPACE=/home/agentos HOME=/home/agentos
+Restart=on-failure
+RestartSec=2
+NoNewPrivileges=yes
+ProtectSystem=strict
+ReadWritePaths=/home/agentos
+IPAddressDeny=any
+# AF_NETLINK: bubblewrap brings up loopback in the empty network namespace it creates.
+RestrictAddressFamilies=AF_UNIX AF_NETLINK
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+MemoryMax=3G
+TasksMax=512
+CPUWeight=50

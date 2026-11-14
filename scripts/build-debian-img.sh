@@ -24,6 +24,8 @@ SOURCES="deb http://deb.debian.org/debian trixie main non-free-firmware
 deb http://deb.debian.org/debian trixie-updates main non-free-firmware
 deb http://security.debian.org/debian-security trixie-security main non-free-firmware"
 PKGS=systemd-sysv,dbus,polkitd,libpam-systemd,network-manager,wpasupplicant,systemd-timesyncd,cage,foot,fonts-dejavu-core
+# Application layer: the sandbox, and LibreOffice Writer as the first operated application. EXTRA_PKGS adds more (e.g. blender).
+PKGS=$PKGS,bubblewrap,libreoffice-writer,python3-uno${EXTRA_PKGS:+,$EXTRA_PKGS}
 PKGS=$PKGS,libgl1-mesa-dri,libegl-mesa0,curl,ca-certificates,login,passwd,less,initramfs-tools
 KEYRINGS=--keyring=/usr/share/keyrings/debian-archive-keyring.gpg
 case $ARCH in
@@ -61,9 +63,9 @@ echo "$SOURCES" | mmdebstrap --mode=unshare --arch="$ARCH" --quiet $KEYRINGS --i
 	--customize-hook="copy-in '$DEB' /tmp" --customize-hook="chroot \"\$1\" sh -eu -c '
 		dpkg -i /tmp/$(basename "$DEB") && rm /tmp/$(basename "$DEB")
 		for v in \$(ls /lib/modules); do /usr/libexec/agentos/update-boot \$v; done
-		useradd -m -G agentd-users,video,render,input -s /usr/sbin/nologin agentos
+		usermod -aG agentd-users,video,render,input agentos # the account itself is made by the package (postinst)
 		if [ -n \"\$ROOT_PASSWORD_HASH\" ]; then usermod -p \"\$ROOT_PASSWORD_HASH\" root; else passwd -q -l root; fi
-		systemctl -q enable agentd.socket agentd.service agentd-broker.socket agentd-approve.socket agentd-broker-recover.service agentos-kiosk.service agentos-key-import.service \\
+		systemctl -q enable agentd.socket agentd.service agentd-broker.socket agentd-approve.socket agentd-broker-recover.service agentd-apps.socket agentd-apps-approve.socket agentos-kiosk.service agentos-key-import.service \\
 			agentos-bootlog.timer agentos-debug.service NetworkManager.service systemd-timesyncd.service
 		systemctl -q disable getty@tty1.service
 		echo agentos >/etc/hostname
