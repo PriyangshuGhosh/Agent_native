@@ -1,0 +1,32 @@
+{
+  "files": {"lo.py": "@libreoffice_lo.py", "odf.py": "@libreoffice_odf.py"},
+  "session": {"socket": "/tmp/OSL_PIPE_{uid}_agentd-live", "binary": "/usr/bin/python3", "handles": ["odt", "docx", "ods", "xlsx", "odp", "pptx"],
+              "launch": ["/usr/bin/soffice", "--norestore", "--accept=pipe,name=agentd-live;urp;", "{file}"],
+              "list": ["{cap:lo.py}", "live-list"], "inspect": ["{cap:lo.py}", "live-inspect", "{file}"]},
+  "capabilities": [
+    {"app": "libreoffice", "id": "convert", "summary": "Convert a document, spreadsheet or presentation to another format (pdf, docx, odt, txt, html, xlsx, ods, csv, pptx, odp, png)",
+     "binary": "/usr/bin/soffice", "timeout_s": 120,
+     "params": {"input": {"type": "file_in"}, "format": {"type": "enum", "values": ["pdf", "docx", "odt", "txt", "html", "xlsx", "ods", "csv", "pptx", "odp", "png"]}, "output": {"type": "file_out", "desc": "must end in .<format>"}},
+     "argv": ["--headless", "--norestore", "--convert-to", "{format}", "--outdir", "{out}", "{input}"],
+     "staged": {"output": "{input.stem}.{format}"},
+     "verify": [{"check": "min_size", "bytes": 1}]},
+    {"app": "libreoffice", "id": "create_text", "summary": "Create a new text document (.odt or .docx) with a title and body paragraphs (one per line)",
+     "binary": "/usr/bin/python3", "timeout_s": 120,
+     "params": {"output": {"type": "file_out"}, "title": {"type": "string"}, "body": {"type": "string"}},
+     "argv": ["{cap:lo.py}", "create", "{output}", "{title}", "{body}"],
+     "verify": [{"check": "magic", "hex": "504b0304"}, {"check": "inspect", "cap": "libreoffice.inspect", "path": "title", "equals": "{title}"}]},
+    {"app": "libreoffice", "id": "replace_text", "summary": "Replace every occurrence of a text in a document, keeping its format",
+     "binary": "/usr/bin/python3", "timeout_s": 120,
+     "params": {"file": {"type": "file_edit"}, "find": {"type": "string"}, "replace": {"type": "string"}},
+     "argv": ["{cap:lo.py}", "replace", "{file}", "{find}", "{replace}"],
+     "live": {"argv": ["{cap:lo.py}", "live-replace", "{file}", "{find}", "{replace}"]},
+     "verify": [{"check": "inspect", "cap": "libreoffice.inspect", "path": "text", "contains": "{replace}"}]},
+    {"app": "libreoffice", "id": "script", "summary": "Run a Python UNO script against a document; the script sees `doc` (the open document) and `uno`; the document is saved afterwards",
+     "binary": "/usr/bin/python3", "timeout_s": 300,
+     "params": {"file": {"type": "file_edit"}, "code": {"type": "script"}},
+     "argv": ["{cap:lo.py}", "script", "{file}", "{code}"],
+     "live": {"argv": ["{cap:lo.py}", "live-script", "{file}", "{code}"]}},
+    {"app": "libreoffice", "id": "inspect", "kind": "inspect", "handles": ["odt", "ods", "odp", "docx"], "summary": "Title, headings, paragraph/word/table counts and text of a document",
+     "binary": "/usr/bin/python3", "params": {"file": {"type": "file_in"}}, "argv": ["{cap:odf.py}", "{file}"]}
+  ]
+}

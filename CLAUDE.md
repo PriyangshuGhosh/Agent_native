@@ -161,6 +161,14 @@ budgets do not apply. amd64 is tested only in a throwaway KVM guest (`-snapshot`
   2026-11-08). Test: `tests/test-txn-recovery.sh`, 14 checks on a qcow2 overlay of the Debian cloud image -- crafted
   interruption stages, 8 SIGKILLs inside real changes, and QEMU power cuts; **the binary has no crash points**. Details
   and limits: `docs/txn-chunk5-2026-11-08.md`. Still to do: the real power pull on the Pi 5.
+- **Application layer (2026-11-14, mandate: the OS operates ordinary applications): read `PROJECT_STATE.md` first.**
+  `agentd/src/apps.rs` + capability packs in `agentd/caps/` (data, not code). Planner actions Tier 2 `app` (run a
+  capability) and `learn` (examine an unknown program, self-test model-written manifests). `agentd apprunner` runs as
+  the person's user (`agentos`); every application operation runs in bubblewrap with no network; results are verified
+  and committed by compare-and-swap so the person's edits are never overwritten; a document open in a live session
+  (LibreOffice UNO pipe, Blender bridge socket) is changed in the open window instead. State: `<home>/.agentd/`.
+  Tests: `tests/test-apps-host.sh` (host, real LibreOffice), `tests/test-apps-vm.sh` (Debian VM; `BLENDER=1` adds Blender).
+  The user requires live, on-screen control of open applications (2026-11-14), not only file-level work.
 - **Debug link (opt-in, never in the image):** `scripts/debug-server.py card <FAT path>` puts `agentos-debug.env` on a card;
   `serve` on the laptop then receives the journal in `build/debug/pi.log`, and `send '<cmd>'` runs a command on the Pi as root.
   TLS is pinned to the server's key (works with a wrong clock) plus a token. Delete the file from the card to turn it off.
