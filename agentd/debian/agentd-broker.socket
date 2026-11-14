@@ -1,0 +1,13 @@
+[Unit]
+Description=CUA-AgentOS broker requests (agentd only)
+
+[Socket]
+ListenStream=/run/agentd-broker.sock
+SocketMode=0660
+SocketGroup=agentd-broker
+Service=agentd-broker.service
+# The broker tells its two sockets apart by these names.
+FileDescriptorName=agent
+
+[Install]
+WantedBy=sockets.target

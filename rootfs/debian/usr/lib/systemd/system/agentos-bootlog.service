@@ -1,0 +1,7 @@
+[Unit]
+Description=Copy this boot's journal to the boot partition (readable on any PC; there is no serial cable)
+RequiresMountsFor=/boot/firmware
+
+[Service]
+Type=oneshot
+ExecStart=/bin/sh -c 'journalctl -b -o short-monotonic --no-pager >/boot/firmware/agentos-journal.txt.new && mv /boot/firmware/agentos-journal.txt.new /boot/firmware/agentos-journal.txt'

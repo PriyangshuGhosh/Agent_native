@@ -1,0 +1,39 @@
+[Unit]
+Description=CUA-AgentOS privileged broker (typed, allowlisted system operations)
+Requires=agentd-broker.socket agentd-approve.socket
+After=agentd-broker.socket agentd-approve.socket
+StartLimitIntervalSec=60
+StartLimitBurst=5
+
+[Service]
+ExecStart=/usr/libexec/agentd-broker
+# Named explicitly: by default a service only inherits the socket unit that shares its name.
+Sockets=agentd-broker.socket agentd-approve.socket
+Restart=on-failure
+RestartSec=2
+LogsDirectory=agentd-broker
+LogsDirectoryMode=0750
+# The transaction journal (/var/lib/agentd-broker) and the one config tree config.set_ntp may write.
+StateDirectory=agentd-broker
+StateDirectoryMode=0700
+ReadWritePaths=-/etc/systemd/timesyncd.conf.d
+# Root only to be allowed to talk to systemd: no capabilities, no network, nothing writable but the audit log.
+CapabilityBoundingSet=
+NoNewPrivileges=yes
+PrivateNetwork=yes
+RestrictAddressFamilies=AF_UNIX
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+RestrictNamespaces=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallArchitectures=native
+MemoryMax=64M
+TasksMax=16

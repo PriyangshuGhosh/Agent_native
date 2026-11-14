@@ -1,0 +1,12 @@
+[Unit]
+Description=CUA-AgentOS approvals (the console only; agentd is not in this group)
+
+[Socket]
+ListenStream=/run/agentd-approve.sock
+SocketMode=0660
+SocketGroup=agentd-users
+Service=agentd-broker.service
+FileDescriptorName=approve
+
+[Install]
+WantedBy=sockets.target

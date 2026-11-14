@@ -1,0 +1,23 @@
+#!/bin/sh
+# Moves /boot/firmware/gemini.env (a GEMINI_API_KEY=... line, or just the bare key) to /etc/agentd/gemini.env, root-only,
+# then deletes it from the FAT partition, which anyone holding the card can read. The key is never printed.
+set -eu
+F=/boot/firmware/gemini.env
+key=$(sed -n 's/^GEMINI_API_KEY=//p' "$F" | tr -d ' \r\n')
+[ -n "$key" ] || key=$(grep -v = "$F" | tr -d ' \r\n' || true)
+model=$(sed -n 's/^AGENTD_MODEL=//p' "$F" | tr -d ' \r\n')
+case $key in
+'' | *[!A-Za-z0-9._-]*) echo "import-key: $F holds no valid key; left it in place" >&2; exit 1 ;;
+esac
+case $model in
+*[!A-Za-z0-9.,_-]*) echo "import-key: ignoring an invalid AGENTD_MODEL" >&2; model= ;;
+esac
+umask 077
+{
+	printf 'GEMINI_API_KEY=%s\n' "$key"
+	[ -z "$model" ] || printf 'AGENTD_MODEL=%s\n' "$model"
+} >/etc/agentd/gemini.env.new
+mv /etc/agentd/gemini.env.new /etc/agentd/gemini.env
+rm -f "$F"
+sync
+echo "import-key: Gemini key moved to /etc/agentd/gemini.env"

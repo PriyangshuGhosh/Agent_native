@@ -1,7 +1,7 @@
 /* agent-init: PID 1 of CUA-AgentOS. Deterministic: no network, no LLM, no inference.
  * Mounts the VFS, reaps every child, proves reaping works, reports PID1_READY and STORAGE_READY on ttyS0, then starts and
  * supervises the session services in order. The final workload (agentd; FINAL_CMD) exiting, SIGTERM/SIGINT (Ctrl-Alt-Del) or the
- * agent.test_poweroff cmdline flag -> SIGTERM everyone, sync, RB_POWER_OFF. */
+ * agent.test_poweroff cmdline flag -> SIGTERM everyone, sync, RB_POWER_OFF (agent.hold: stop there, no power-off). */
 #define _GNU_SOURCE
 #include <dirent.h>
 #include <errno.h>
@@ -51,7 +51,7 @@ static char *session_env[] = {
 };
 
 static volatile sig_atomic_t got_chld, stop;
-static int reaped, tty = -1, logfd = -1, nullfd = -1;
+static int reaped, hold, tty = -1, logfd = -1, nullfd = -1;
 static pid_t last_reaped;
 
 static void on_sigchld(int sig)
@@ -164,7 +164,10 @@ static void shutdown_all(void)
 	mount(NULL, "/", NULL, MS_REMOUNT | MS_RDONLY, NULL);
 	mount(NULL, "/mnt/rw", NULL, MS_REMOUNT | MS_RDONLY, NULL);
 	sync();
-	reboot(RB_POWER_OFF);
+	if (hold) /* agent.hold: keep the last screen (HDMI console) instead of powering off */
+		dprintf(tty, "# agent-init: run finished, holding (agent.hold); safe to unplug\n");
+	else
+		reboot(RB_POWER_OFF);
 }
 
 static void on_stop(int sig)
@@ -330,7 +333,7 @@ int main(void)
 {
 	struct sigaction sa;
 	sigset_t mask, empty;
-	char comm[32], cmdline[512], mounts[512], line[1536], *p;
+	char comm[32], cmdline[2048], mounts[512], line[3072], *p;
 	int zombies, user, ok, n;
 	pid_t child;
 
@@ -360,7 +363,9 @@ int main(void)
 	sigemptyset(&empty);
 
 	mount_vfs();
-	tty = open("/dev/ttyS0", O_WRONLY | O_NOCTTY | O_CLOEXEC);
+	/* AGENT_TTY=<dev|file> on the kernel cmdline reaches us (and agentd) as env; append so a log file shared with agentd
+	 * keeps both writers' lines. The Pi 5 SD image logs to its FAT partition. */
+	tty = open(getenv("AGENT_TTY") ? getenv("AGENT_TTY") : "/dev/ttyS0", O_WRONLY | O_APPEND | O_NOCTTY | O_CLOEXEC);
 	/* Firmware leaves an unterminated line on ttyS0; start ours on a fresh one. */
 	if (tty >= 0 && write(tty, "\n", 1) < 0) {
 		/* no other channel to report on */
@@ -387,6 +392,7 @@ int main(void)
 		/* no other channel to report on */
 	}
 
+	hold = strstr(cmdline, "agent.hold") != NULL;
 	if (strstr(cmdline, "agent.test_poweroff"))
 		stop = 1;
 	else

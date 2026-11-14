@@ -43,6 +43,7 @@ Cycle 05 cognitive-loop markers (added at the user's request): `TASK_START`, `ST
 Cycle 06 storage/lifecycle markers (added at the user's request): `STORAGE_READY`, `LIFECYCLE_INSTALL`,
 `LIFECYCLE_VERIFIED`, `LIFECYCLE_FAIL_INJECTED`, `ROLLBACK_TRIGGERED`, `ROLLBACK_VERIFIED`. They are emitted
 alongside the canonical `CAPABILITY_INSTALLED` / `CAPABILITY_ROLLBACK`, and gate 06 asserts both sets.
+Debian broker markers (added at the user's request, 2026-11-08): `BROKER_AUDIT` (with `phase`), `APPROVAL_REQUIRED`.
 
 ## The 8 cycles (canonical; `overview/phases.html` is informational only)
 | # | Cycle | Gate script (must exit 0) | Gate condition |
@@ -103,3 +104,63 @@ rubric 100/100 (`docs/grading-report.md`).
 the SIGUSR1 emergency stop, strict directive validation and allow-lists, a crash-safe install journal, and persistent `/data`
 (ext4 disk labelled `agentos-data`, optional; it is exercised by `tests/test-persist.sh`). Fast suite: `tests/regress.sh`.
 All gates were rerun from a clean rebuild.
+
+**Raspberry Pi 5 image (2026-10-29, not gated):** `scripts/build-pi5-img.sh` cross-builds the Cycle 06 system for aarch64
+(`ARCH=aarch64 KERNEL=rpi CROSS=aarch64-linux-gnu- BASE_FS=mmc`) into `build/pi5/cua-agentos-pi5.img`: MBR, p1 FAT32 boot
+(config.txt, cmdline.txt, Alpine `linux-rpi` kernel, initramfs, bcm2712 DTBs), p2 raw SquashFS (`/dev/mmcblk0p2`).
+Needs `gcc-aarch64-linux-gnu qemu-user-static mtools` (rootless copies: `. build/cross/env.sh`). Telemetry goes to
+`AGENT_TTY` (kernel cmdline env, default `/dev/ttyS0`; the Pi writes `agentos.log` on its FAT partition, no serial cable).
+The image ran on a real Pi 5 (all checks pass except AGENTD_READY 4.1 s > 3 s). Progress and next steps: `docs/pi5-2026-10-29.md`.
+
+## Debian base direction (2026-10-29, branch `debian-base`)
+**Paused 2026-10-30. To resume, read `docs/RESUME.md` first** (state, known gaps, what's left, host setup, commands).
+Product direction is now `CUA-AgentOS_goal.md`: a general-purpose distro (amd64 + arm64, Pi 5 first among the ARM boards),
+built as **Debian 13 (trixie) + our packages**. The work is reused, not reinvented. The Alpine/agent-init cycles above
+stay as a record, and their gates must keep passing. On Debian: systemd is PID 1, and agent-init and the ≤1000 ms boot
+budgets do not apply. amd64 is tested only in a throwaway KVM guest (`-snapshot`); hardware tests happen on the Pi 5.
+- **Model:** `gemini-2.5-flash` is closed to new API keys, so live calls use `AGENTD_MODEL` (default
+  `gemini-3.5-flash-lite,gemini-3.1-flash-lite,gemini-3.6-flash,gemini-3-flash-preview`, tried in order; the lite models lead
+  because the others hit free-tier 429s after a few requests, and 3.8 was dropped because it timed out or returned 503 on
+  every call measured), with Gemini `responseSchema` forcing the directive shape. Replaying real planner requests (2026-10-30)
+  showed the slow or failed answers are on Gemini's side (503s, a 429, first byte up to 29 s; TLS under 0.35 s). Each attempt
+  is logged as `PLANNER_TRY`; `CLOCK_WAIT` means a task is waiting for internet time (Pi 5: no set clock at boot). The Alpine gates still replay the recorded 2.5-flash fixture.
+- **Step 1 (done):** `scripts/build-deb.sh` builds `build/deb/agentd_<ver>_amd64.deb`: `agentd serve` as `agentd.service`
+  (DynamicUser, ProtectSystem=strict, Restart=on-failure with StartLimitBurst=5/60 s). Requests arrive through
+  `agentd.socket` (`/run/agentd.sock`, 0660, group `agentd-users`, socket-activated, so it survives agentd restarts);
+  `agentd ask <request>` is the root/admin client. The key goes in `/etc/agentd/gemini.env`
+  (`GEMINI_API_KEY=...`, optional; without it, tasks fail with "planner unavailable" and the service stays up). It reaches
+  curl only through its stdin config. Planner actions on Debian: Tier 2 `tr` only (`/run` is noexec, so Tier 1 cannot
+  dlopen there, and there is no GUI for Tier 3). Test: `scripts/fetch-debian-cloud.sh`, then `tests/test-debian-vm.sh`
+  (11 checks, including a live Gemini plan → execute → verify; about 1 min).
+- **Step 2 (done):** `agentd-console.service` runs `agentd console` on tty1 (it takes tty1 from getty; tty2 keeps a
+  normal login as the recovery route). It is an unprivileged client in group `agentd-users`. It prints each task in
+  plain words (plan, each verified step, repairs, outcome, and "Nothing was changed" when no plan ran). `status` and
+  `help` are answered locally, without the model: the console sends `/status` and agentd replies with the event
+  `AGENTD_STATUS` (planner, models, uptime, tasks), which was added for this step. No approval prompts yet, since there
+  are no high-risk actions. Tested by piping input through the console in the VM; tty1 has not yet been looked at on a
+  real screen.
+- **Step 3:** `scripts/build-debian-img.sh` (mmdebstrap, not mkosi; `ARCH=amd64` or `arm64`, about 17 min under emulation,
+  needs `. build/cross/env.sh`). Test: `tests/test-debian-img.sh` boots amd64 in a throwaway KVM guest.
+- **Chat and read tools:** the planner may answer with `CHAT_REPLY` (labelled with the `modelVersion` Google returns; the words
+  go only to the client, never the journal; 20 turns of memory until agentd restarts). Tier 2 `read` runs a fixed tool list
+  (`date`, `uname`, `df`, `uptime`, `free`) with fixed args; its check is a clean exit with output, since it cannot be predicted.
+- **Privileged broker (chunk 4, 2026-11-08):** `agentd/src/bin/agentd-broker.rs`, root with no capabilities or network, socket-activated.
+  Policy is compiled in: `service.status` and `service.restart` on `cron`, `systemd-timesyncd` (automatic) and `NetworkManager` (needs approval, 60 s, default no).
+  `/run/agentd-broker.sock` is group `agentd-broker` (agentd only); `/run/agentd-approve.sock` is group `agentd-users` (console only), so agentd cannot approve.
+  Planner action: Tier 2 `broker`; agentd checks only its shape, and a broker failure ends the task without a replan. Audit: `/var/log/agentd-broker/audit.jsonl`.
+  Test: `tests/test-debian-vm.sh`. An upgrade with a `prerm` older than this one stops the kiosk: afterwards run `systemctl disable --now getty@tty1 && systemctl restart agentos-kiosk`.
+- **Transactions and recovery (chunk 5, 2026-11-08):** the broker's one modifying operation is Tier 2 `broker` with target
+  `config.set_ntp` (unit `systemd-timesyncd.service`, second argument a server from a compiled-in list of four). It writes
+  `/etc/systemd/timesyncd.conf.d/50-agentd-ntp.conf` as a journalled transaction (`agentd/src/txn.rs`, extracted from
+  `main.rs` and now shared with agentd's capability installs; journal in `StateDirectory=/var/lib/agentd-broker/txn`),
+  restarts timesyncd, and confirms the change by asking the daemon (`timedatectl show-timesync --property=SystemNTPServers`),
+  never by reading the file back. Anything short of that rolls back to the prior bytes and mode and says so. New audit
+  phases: `rolled_back` (with `clean`), `recovered`, `recovery_failed`. Recovery runs at boot
+  (`agentd-broker-recover.service`, ordered before timesyncd and both agentd sockets), at socket activation, and before
+  every `set_ntp`. No approval prompt: it is reversible, verified and limited to the compiled-in list (the user's choice,
+  2026-11-08). Test: `tests/test-txn-recovery.sh`, 14 checks on a qcow2 overlay of the Debian cloud image -- crafted
+  interruption stages, 8 SIGKILLs inside real changes, and QEMU power cuts; **the binary has no crash points**. Details
+  and limits: `docs/txn-chunk5-2026-11-08.md`. Still to do: the real power pull on the Pi 5.
+- **Debug link (opt-in, never in the image):** `scripts/debug-server.py card <FAT path>` puts `agentos-debug.env` on a card;
+  `serve` on the laptop then receives the journal in `build/debug/pi.log`, and `send '<cmd>'` runs a command on the Pi as root.
+  TLS is pinned to the server's key (works with a wrong clock) plus a token. Delete the file from the card to turn it off.

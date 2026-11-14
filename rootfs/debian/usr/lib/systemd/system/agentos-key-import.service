@@ -1,0 +1,12 @@
+[Unit]
+Description=Move the Gemini key from the boot partition into /etc/agentd
+ConditionPathExists=/boot/firmware/gemini.env
+RequiresMountsFor=/boot/firmware
+Before=agentd.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/libexec/agentos/import-key
+
+[Install]
+WantedBy=multi-user.target

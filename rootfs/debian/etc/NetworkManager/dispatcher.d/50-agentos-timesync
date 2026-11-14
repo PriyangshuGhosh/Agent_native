@@ -1,0 +1,5 @@
+#!/bin/sh
+# Boards with no battery clock start with a stale date, and certificates fail until it is set. timesyncd can sit in a
+# long retry backoff from before the network came up (29 s measured on a Pi 5), so ask it again as soon as we are online.
+[ "$2" = up ] && exec systemctl --no-block restart systemd-timesyncd.service
+exit 0
