@@ -1,0 +1,9 @@
+# Documents the agent can operate open through agentd (agentos-open.desktop), so the open window is the one the agent works in.
+[Default Applications]
+application/x-blender=agentos-open.desktop
+application/vnd.oasis.opendocument.text=agentos-open.desktop
+application/vnd.openxmlformats-officedocument.wordprocessingml.document=agentos-open.desktop
+application/vnd.oasis.opendocument.spreadsheet=agentos-open.desktop
+application/vnd.openxmlformats-officedocument.spreadsheetml.sheet=agentos-open.desktop
+application/vnd.oasis.opendocument.presentation=agentos-open.desktop
+application/vnd.openxmlformats-officedocument.presentationml.presentation=agentos-open.desktop

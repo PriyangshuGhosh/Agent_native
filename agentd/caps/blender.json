@@ -1,7 +1,8 @@
 {
   "files": {"bl.py": "@blender_bl.py", "client.py": "@blender_client.py"},
+  "_note": "shortcut: LIBGL_ALWAYS_SOFTWARE=1 because Blender 4.3 needs OpenGL 4.3 and the Pi 5 GPU (V3D 7.1) stops at 3.1; drop it when the launch can pick the renderer per machine",
   "session": {"socket": "/tmp/agentd-blender-{uid}.sock", "binary": "/usr/bin/python3", "handles": ["blend"],
-              "launch": ["/usr/bin/blender", "{file}", "--python", "/usr/share/agentd/caps/blender_bridge.py"],
+              "launch": ["/usr/bin/env", "LIBGL_ALWAYS_SOFTWARE=1", "/usr/bin/blender", "{file}", "--python", "/usr/share/agentd/caps/blender_bridge.py"],
               "list": ["{cap:client.py}", "list"], "inspect": ["{cap:client.py}", "inspect", "{file}"]},
   "capabilities": [
     {"app": "blender", "id": "new_scene", "summary": "Create a new .blend 3D scene by running a Blender Python (bpy) script on an empty scene; the scene is saved afterwards",

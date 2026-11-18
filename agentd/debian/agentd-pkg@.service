@@ -1,0 +1,14 @@
+# One Debian package install, started by agentd-broker (pkg.install) after the person approved it on the console.
+# A oneshot: `systemctl start` returns when apt is done, and the broker then checks dpkg's record itself.
+[Unit]
+Description=CUA-AgentOS package install: %i
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+Environment=DEBIAN_FRONTEND=noninteractive
+# A stale or missing package list is refreshed first; no network makes the install itself fail, which the broker reports.
+ExecStartPre=-/usr/bin/apt-get -q update
+ExecStart=/usr/bin/apt-get -q -y --no-install-recommends install -- %i
+TimeoutStartSec=880

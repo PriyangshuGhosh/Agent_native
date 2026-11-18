@@ -1,0 +1,7 @@
+[Desktop Entry]
+Type=Application
+Name=Open with the agent connected
+Comment=Opens the document in its application with the control connection the agent uses, so the agent's changes appear in this window
+Exec=/usr/bin/agentd apps open %f
+NoDisplay=true
+MimeType=application/x-blender;application/vnd.oasis.opendocument.text;application/vnd.openxmlformats-officedocument.wordprocessingml.document;application/vnd.oasis.opendocument.spreadsheet;application/vnd.openxmlformats-officedocument.spreadsheetml.sheet;application/vnd.oasis.opendocument.presentation;application/vnd.openxmlformats-officedocument.presentationml.presentation;

@@ -25,7 +25,7 @@ install -m 644 "$ROOT/agentd/debian/agentd.service" "$ROOT/agentd/debian/agentd-
 	"$ROOT/agentd/debian/agentd.socket" "$ROOT/agentd/debian/agentd-broker.service" \
 	"$ROOT/agentd/debian/agentd-broker.socket" "$ROOT/agentd/debian/agentd-approve.socket" \
 	"$ROOT/agentd/debian/agentd-broker-recover.service" "$ROOT/agentd/debian/agentd-apps.service" \
-	"$ROOT/agentd/debian/agentd-apps.socket" "$ROOT/agentd/debian/agentd-apps-approve.socket" "$P/usr/lib/systemd/system/"
+	"$ROOT/agentd/debian/agentd-apps.socket" "$ROOT/agentd/debian/agentd-apps-approve.socket" "$ROOT/agentd/debian/agentd-pkg@.service" "$P/usr/lib/systemd/system/"
 install -d "$P/usr/share/agentd/caps" && install -m 644 "$ROOT"/agentd/caps/* "$P/usr/share/agentd/caps/"
 install -m 755 "$ROOT/agentd/debian/postinst" "$ROOT/agentd/debian/prerm" "$ROOT/agentd/debian/postrm" "$P/DEBIAN/"
 chmod 700 "$P/etc/agentd" # gemini.env goes here; the key never ships in the package

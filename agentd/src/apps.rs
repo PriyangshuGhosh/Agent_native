@@ -736,15 +736,38 @@ fn run_live(ctx: &Ctx, m: &Value, params: &Map<String, Value>, args: &Map<String
               "note": "changed in the open application window; not saved to disk"}))
 }
 
-/// Opens `path` in its application with the control connection enabled, as the human's own (unsandboxed) application.
-pub fn open(ctx: &Ctx, path: &str) -> Res<Value> {
+/// Opens `path` in its application with the control connection enabled, as the human's own (unsandboxed) application,
+/// on the desktop that is on the screen. `wait`: return once the application lists the file (so the next operation
+/// on it goes through that window), or after 20 s.
+pub fn open(ctx: &Ctx, path: &str, wait: bool) -> Res<Value> {
     let p = ws_path(ctx, path, true)?;
     let ext = json!(p.extension().unwrap_or_default().to_string_lossy().to_lowercase());
     let (m, _) = load_caps(ctx).into_iter().find(|(m, t)| *t != "generated" && m["session"]["handles"].as_array().is_some_and(|h| h.contains(&ext)) && m["session"]["launch"].is_array())
         .ok_or("no application with a live session handles this file")?;
     let argv: Vec<String> = m["session"]["launch"].as_array().unwrap().iter().filter_map(Value::as_str).map(|a| a.replace("{file}", &p.to_string_lossy())).collect();
-    let child = std::process::Command::new(&argv[0]).args(&argv[1..]).stdin(std::process::Stdio::null()).spawn()?;
-    Ok(json!({"opened": ctx.rel(&p), "app": m["app"], "pid": child.id()}))
+    let mut cmd = std::process::Command::new(&argv[0]);
+    // No inherited pipes: a caller reading our output must not wait for the application to exit.
+    cmd.args(&argv[1..]).stdin(std::process::Stdio::null()).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null());
+    // The runner is a service without a display of its own: it joins the person's labwc session (logind runtime dir).
+    if std::env::var_os("WAYLAND_DISPLAY").is_none() {
+        let rt = format!("/run/user/{}", unsafe { libc::getuid() });
+        if !Path::new(&rt).join("wayland-0").exists() {
+            return Err("no desktop is on the screen".into());
+        }
+        cmd.env("XDG_RUNTIME_DIR", &rt).env("WAYLAND_DISPLAY", "wayland-0");
+        // Debian's Blender (4.3, arm64) only has the X11 back-end: labwc's Xwayland is display :0.
+        if Path::new("/tmp/.X11-unix/X0").exists() {
+            cmd.env("DISPLAY", ":0");
+        }
+    }
+    let mut child = cmd.spawn()?;
+    let pid = child.id();
+    std::thread::spawn(move || { let _ = child.wait(); }); // reap: the application outlives this call
+    let t0 = std::time::Instant::now();
+    while wait && t0.elapsed() < Duration::from_secs(20) && live_session(ctx, &p).is_none() {
+        std::thread::sleep(Duration::from_millis(500));
+    }
+    Ok(json!({"opened": ctx.rel(&p), "app": m["app"], "pid": pid}))
 }
 
 struct Out {
@@ -759,7 +782,9 @@ struct Out {
 /// for an inspect capability its data. Any failure before the commit leaves the workspace untouched.
 pub fn run(ctx: &Ctx, key: &str, args: &Map<String, Value>, approve: &mut dyn FnMut(&str) -> bool) -> Res<Value> {
     let (m, trust) = load_caps(ctx).into_iter().find(|(m, _)| cap_key(m) == key).ok_or(format!("no capability {key}"))?;
-    if trust == "generated" {
+    // Growth mode (AGENTD_TRUST_GENERATED, the person's choice 2026-11-14): learned capabilities run without the
+    // first-use question; `agentd apps review` lists them and `forget` removes one after the person's review.
+    if trust == "generated" && std::env::var_os("AGENTD_TRUST_GENERATED").is_none() {
         if !approve(&format!("Capability {key} has not been reviewed. It runs {} in a sandbox. Summary: {}", s(&m, "binary"), s(&m, "summary"))) {
             return Err(format!("{key} was not approved").into());
         }
@@ -780,10 +805,20 @@ pub fn run(ctx: &Ctx, key: &str, args: &Map<String, Value>, approve: &mut dyn Fn
     // A document open in a live session is changed there, in front of the human; anything else goes through files.
     let live = params.iter().filter(|(_, sp)| !m["live"].is_null() && s(sp, "type") == "file_edit").filter_map(|(n, _)| ws_path(ctx, args.get(n)?.as_str()?, true).ok())
         .find(|p| live_session(ctx, p).is_some());
-    let r = match live {
+    let mut r = match live {
         Some(f) => run_live(ctx, &m, params, args, &id, &opdir, &f, approve),
         None => run_op(ctx, &m, params, args, &id, &opdir, approve),
     };
+    // The person sees finished work: the runner (a service, no display of its own) opens a committed file in its
+    // application on the desktop, when there is one and the application has a live session; later operations on it
+    // then happen in that window. From a terminal (WAYLAND_DISPLAY set) the person decides what to open.
+    if let (Ok(v), None) = (&mut r, std::env::var_os("WAYLAND_DISPLAY")) {
+        let paths: Vec<String> = v["outputs"].as_array().into_iter().flatten().filter(|o| o["state"] == "committed").filter_map(|o| o["path"].as_str().map(String::from)).collect();
+        let opened: Vec<String> = paths.into_iter().filter(|p| open(ctx, p, true).is_ok()).collect();
+        if !opened.is_empty() {
+            v["opened"] = json!(opened);
+        }
+    }
     if let Err(e) = &r {
         journal(ctx, &id, "failed", json!({"error": e.to_string()}))?;
         let mut w = world_load(ctx).unwrap_or_default();
@@ -1097,6 +1132,51 @@ pub fn install(ctx: &Ctx, binary: &str, proposals: &Value) -> Res<Value> {
     Ok(json!(report))
 }
 
+/// `shell`: one command line as the person (their account, their folder, no root, no sandbox: the same terminal the
+/// person has, which they asked the agent to get, 2026-11-14). 120 s cap, output capped at 16 KiB, every call
+/// journalled in ops.jsonl; the world state is synced afterwards so files the command made are known.
+pub fn shell(ctx: &Ctx, cmd: &str) -> Res<Value> {
+    if cmd.trim().is_empty() || cmd.len() > 4000 || cmd.contains('\0') {
+        return Err("the command is empty, too long or has a NUL byte".into());
+    }
+    let id = format!("sh{:x}-{}-{}", now_ms(), std::process::id(), OP_SEQ.fetch_add(1, SeqCst));
+    journal(ctx, &id, "shell", json!({"cmd": cmd}))?;
+    let ws = ctx.ws.to_string_lossy().into_owned();
+    // shortcut: the folder is spliced into the command line, fine for a path with no quote (the person's home).
+    let line = format!("cd '{ws}' && {{\n{cmd}\n}}");
+    // The person's PATH (Debian puts some programs in /usr/games; pip --user in ~/.local/bin), and their desktop, so
+    // `agentd apps open <file>` from here puts a document on the screen.
+    let path = format!("{ws}/.local/bin:/usr/local/bin:/usr/bin:/bin:/usr/games");
+    let rt = format!("/run/user/{}", unsafe { libc::getuid() });
+    let (code, out, err) = run_group(&["/bin/sh", "-c", &line], "", &[("HOME", &ws), ("PATH", &path), ("LANG", "C.UTF-8"), ("TERM", "dumb"),
+        ("AGENTD_WORKSPACE", &ws), ("XDG_RUNTIME_DIR", &rt)], Duration::from_secs(120), true)?;
+    let mut text = out + &err;
+    if text.len() > 16384 {
+        let cut = (0..=16384).rev().find(|i| text.is_char_boundary(*i)).unwrap_or(0);
+        text.truncate(cut);
+        text += "\n[output cut at 16 KiB]";
+    }
+    journal(ctx, &id, "shell_done", json!({"exit": code, "bytes": text.len()}))?;
+    let _ = sync(ctx);
+    Ok(json!({"op": id, "exit": code, "output": text}))
+}
+
+/// The learned (`generated`) capabilities, for the person's review: where each is stored and what it runs.
+pub fn review(ctx: &Ctx) -> Value {
+    json!(load_caps(ctx).iter().filter(|(_, t)| *t == "generated").map(|(m, _)| json!({"cap": cap_key(m), "file": ctx.st.join("caps").join(format!("{}-{}.json", s(m, "app"), s(m, "id"))),
+        "binary": m["binary"], "argv": m["argv"], "params": m["params"], "summary": m["summary"]})).collect::<Vec<_>>())
+}
+
+/// Removes one learned capability (never a built-in one).
+pub fn forget(ctx: &Ctx, key: &str) -> Res<Value> {
+    let (m, trust) = load_caps(ctx).into_iter().find(|(m, _)| cap_key(m) == key).ok_or(format!("no capability {key}"))?;
+    if trust != "generated" {
+        return Err(format!("{key} is built in (in {}), not a learned capability", ctx.builtin.display()).into());
+    }
+    fs::remove_file(ctx.st.join("caps").join(format!("{}-{}.json", s(&m, "app"), s(&m, "id"))))?;
+    Ok(json!({"forgotten": key}))
+}
+
 // ---------- planner context and the runner service ----------
 
 /// What the planner is told: how to call a capability, which exist, the person's files with their state, and what
@@ -1118,7 +1198,7 @@ Capabilities:
         let ps = m["params"].as_object().into_iter().flatten().map(|(n, p)| format!("{n}: {}{}{}", s(p, "type"),
             p["values"].as_array().map_or(String::new(), |v| format!("{v:?}")), if p["optional"] == true { "?" } else { "" })).collect::<Vec<_>>().join(", ");
         t += &format!("- {}({ps}){}{} : {}\n", cap_key(&m), if m["live"].is_null() { "" } else { " [live]" },
-            if trust == "generated" { " [unreviewed: the person is asked first]" } else { "" }, s(&m, "summary"));
+            if trust == "generated" && std::env::var_os("AGENTD_TRUST_GENERATED").is_none() { " [unreviewed: the person is asked first]" } else { "" }, s(&m, "summary"));
     }
     let apps: Vec<String> = scan_apps(ctx).iter().filter(|a| a["capabilities"].as_array().is_some_and(Vec::is_empty) && a["hidden"] != true && !a["binary"].is_null())
         .take(60).map(|a| format!("{} ({})", s(a, "id"), s(a, "name"))).collect();
@@ -1191,6 +1271,7 @@ pub fn serve(ctx: &Ctx, agent: UnixListener, approve: UnixListener) -> Res<()> {
                 Err(e) => Err(e.into()),
             },
             "probe" => probe(ctx, s(&req, "app")).map(|e| json!({"status": "ok", "output": e})),
+            "shell" => shell(ctx, s(&req, "cmd")).map(|r| json!({"status": "ok", "output": r})),
             "install" => install(ctx, s(&req, "binary"), &req["capabilities"]).map(|r| json!({"status": "ok", "output": r})),
             op => Err(format!("unknown request {op:?}").into()),
         };
@@ -1219,7 +1300,7 @@ pub fn runner(args: &[String]) -> Res<()> {
 
 // ---------- command line ----------
 
-/// `agentd apps <list|caps|probe|run|state|world|sync|changes|ops|undo|recover>`: prints JSON.
+/// `agentd apps <list|caps|probe|run|state|open|shell|review|forget|world|sync|changes|ops|undo|recover>`: prints JSON.
 pub fn cli(args: &[String]) -> Res<()> {
     let ctx = Ctx::from_env()?;
     let arg = |i: usize| args.get(i).map(String::as_str).ok_or("missing argument");
@@ -1243,7 +1324,10 @@ pub fn cli(args: &[String]) -> Res<()> {
             })?
         }
         "state" => state(&ctx, arg(1)?)?,
-        "open" => open(&ctx, arg(1)?)?,
+        "open" => open(&ctx, arg(1)?, false)?,
+        "shell" => shell(&ctx, &args[1..].join(" "))?,
+        "review" => review(&ctx),
+        "forget" => forget(&ctx, arg(1)?)?,
         "world" => world(&ctx)?,
         "sync" => json!(sync(&ctx)?),
         "changes" => json!(read_lines(&ctx.st.join("changes.jsonl"))),
@@ -1399,6 +1483,24 @@ mod tests {
             m[field] = bad;
             assert!(check_manifest(&m).is_err(), "{field}");
         }
+    }
+
+    #[test]
+    fn shell_runs_as_the_person_in_their_folder_and_forget_removes_only_learned_capabilities() {
+        let c = ctx("shell");
+        let r = shell(&c, "printf hi > made.txt; cat made.txt; pwd").unwrap();
+        assert_eq!(r["exit"], 0);
+        assert_eq!(r["output"].as_str().unwrap(), format!("hi{}\n", c.ws.display()));
+        assert!(c.ws.join("made.txt").is_file() && world(&c).unwrap()["made.txt"].is_object(), "the world state must know the new file");
+        assert_eq!(shell(&c, "exit 3").unwrap()["exit"], 3);
+        assert!(shell(&c, "echo $PATH").unwrap()["output"].as_str().unwrap().contains("/usr/games"), "Debian's games dir must be on the PATH");
+        assert!(shell(&c, "").is_err());
+        assert!(forget(&c, "t.upper").is_err(), "built-in capabilities cannot be forgotten");
+        fs::write(c.st.join("caps/t-learned.json"), json!({"app": "t", "id": "learned", "summary": "x", "binary": PY, "params": {},
+            "argv": ["-c", "pass"], "verify": [{"check": "min_size", "bytes": 1}]}).to_string()).unwrap();
+        assert_eq!(review(&c).as_array().unwrap().len(), 1);
+        forget(&c, "t.learned").unwrap();
+        assert!(review(&c).as_array().unwrap().is_empty());
     }
 
     #[test]
