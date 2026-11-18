@@ -17,14 +17,14 @@ umask 077
 
 cp --sparse=always "$IMG" "$S/disk.img"
 cp /usr/share/OVMF/OVMF_VARS_4M.fd "$S/vars.fd"
-EXPECT="systemd_pid1 root_locked agentd_active broker_ready_at_boot kiosk_on_screen input_devices typed_on_screen wifi_wrong_password
+EXPECT="systemd_pid1 root_locked agentd_active broker_ready_at_boot kiosk_on_screen input_devices desktop_panel file_manager_opens doc_click_via_agentd agent_work_on_screen typed_on_screen wifi_wrong_password
 	wifi_joined wifi_saved_root_only bootlog_on_fat timesync_on_network_up debug_wrong_pin debug_wrong_token debug_command debug_journal"
 ESP="$S/disk.img@@1M"
 export MTOOLS_SKIP_CHECK=1
 if [ -r "$KEY_FILE" ]; then
 	cp "$KEY_FILE" "$S/gemini.env"
 	mcopy -i "$ESP" "$S/gemini.env" ::/gemini.env
-	EXPECT="$EXPECT key_imported live_typed_task clock_wait_recovers read_tool_date chat_reply chat_not_logged key_not_logged"
+	EXPECT="$EXPECT key_imported live_typed_task clock_wait_recovers read_tool_date chat_reply chat_not_logged key_not_logged agent_shell_as_person agent_installs_package install_refused_without_yes"
 fi
 # Debug link: the server runs here, reached from the guest as 10.0.2.2 (QEMU user-mode NAT).
 export DEBUG_DIR="$S/debug"
@@ -57,11 +57,22 @@ upto 30 systemctl is-active -q agentd; check agentd_active $?
 check broker_ready_at_boot $?
 
 upto 60 console_up; sleep 3
-cage=$(pgrep -u agentos -x cage); con=$(pgrep -u agentos -f '^/usr/bin/agentd console')
-systemctl is-active -q agentos-kiosk && pgrep -u agentos -x foot >/dev/null && [ -n "$cage" ] &&
+wm=$(pgrep -u agentos -x labwc); con=$(pgrep -u agentos -f '^/usr/bin/agentd console')
+systemctl is-active -q agentos-kiosk && pgrep -u agentos -x foot >/dev/null && [ -n "$wm" ] &&
 	readlink /proc/"$con"/fd/0 | grep -q '^/dev/pts/'; check kiosk_on_screen $?
-# Detection only: cage (libinput) holds the USB keyboard and tablet open.
-[ "$(ls -l /proc/"$cage"/fd | grep -c '/dev/input/event')" -ge 2 ]; check input_devices $?
+# Detection only: labwc (libinput) holds the USB keyboard and tablet open.
+[ "$(ls -l /proc/"$wm"/fd | grep -c '/dev/input/event')" -ge 2 ]; check input_devices $?
+# The desktop for the person: panel, file manager, and a document double-click goes through agentd.
+pgrep -u agentos -x waybar >/dev/null; check desktop_panel $?
+as_person() { runuser -u agentos -- env HOME=/home/agentos XDG_RUNTIME_DIR=/run/user/1000 WAYLAND_DISPLAY=wayland-0 "$@"; }
+as_person pcmanfm & sleep 4; pgrep -u agentos -x pcmanfm >/dev/null; check file_manager_opens $?
+[ "$(as_person xdg-mime query default application/vnd.oasis.opendocument.text)" = agentos-open.desktop ]; check doc_click_via_agentd $?
+# The agent's finished work appears on the screen: the runner (no display of its own) opens a committed document.
+r=$(runuser -u agentos -- env HOME=/home/agentos AGENTD_WORKSPACE=/home/agentos agentd apps run libreoffice.create_text output=shown.odt title=Shown body='Made by the agent' 2>&1)
+echo "$r" | tr -d '\n ' | cut -c1-300
+echo "$r" | grep -q '"opened"' && pgrep -u agentos -f 'soffice.*agentd-live' >/dev/null; check agent_work_on_screen $?
+echo SHOT_NOW
+sleep 10; pkill -u agentos -x pcmanfm; pkill -u agentos -f soffice; sleep 2 # the typed request below must reach the console
 
 if [ -e /etc/agentd/gemini.env ]; then
 	[ ! -e /boot/firmware/gemini.env ] && [ "$(stat -c %a:%U /etc/agentd/gemini.env)" = 600:root ] &&
@@ -72,6 +83,7 @@ echo TYPE_NOW
 typed() { journalctl -b -u agentd -o cat --no-pager --since "@$mark" | grep -q TASK_COMPLETE; }
 upto 90 typed; check typed_on_screen $?
 if [ -e /etc/agentd/gemini.env ]; then
+	journalctl -b -u agentd -o cat --no-pager --since "@$mark" | grep -v PLANNER_TRY | cut -c1-300 # which route the model took
 	journalctl -b -u agentd -o cat --no-pager --since "@$mark" | grep STEP_VERIFIED | grep -q 'TYPED ON SCREEN'
 	check live_typed_task $?
 fi
@@ -99,6 +111,15 @@ if [ -e /etc/agentd/gemini.env ]; then
 	agentd ask 'Hello! Please reply with the word pineapple-seven.' >/run/chat.out 2>&1
 	grep CHAT_REPLY /run/chat.out | grep -q 'gemini' && grep -qi pineapple-seven /run/chat.out; check chat_reply $?
 	! journalctl -b -o cat --no-pager | grep -qi pineapple-seven; check chat_not_logged $?
+	# The agent's terminal (as the person, never root) and software without a new image (broker, approved on the console).
+	printf 'Use the shell to create a folder named demo-dir in my home folder\n' | runuser -u agentos -- agentd console >/run/sh.out 2>&1
+	cut -c1-200 /run/sh.out | tail -n 6
+	[ -d /home/agentos/demo-dir ] && [ "$(stat -c %U /home/agentos/demo-dir)" = agentos ]; check agent_shell_as_person $?
+	printf 'Install the Debian package sl\nyes\n' | runuser -u agentos -- agentd console >/run/pkg.out 2>&1
+	cut -c1-200 /run/pkg.out | tail -n 8
+	dpkg-query -W -f='${Status}' sl 2>/dev/null | grep -q 'install ok installed' && grep -q '"op":"Install"' /var/log/agentd-broker/audit.jsonl; check agent_installs_package $?
+	printf 'Install the Debian package cowsay\nno\n' | runuser -u agentos -- agentd console >/run/pkg2.out 2>&1
+	! dpkg-query -W -f='${Status}' cowsay 2>/dev/null | grep -q 'ok installed'; check install_refused_without_yes $?
 fi
 
 # Wi-Fi: test-only tools (never in the image), one simulated radio for NetworkManager, the other as the access point.
@@ -135,6 +156,8 @@ mcopy -i "$ESP" "$S/guest.sh" ::/guest.sh
 KEYS="shift-u p p e r minus c a s e spc t h e spc t e x t shift-semicolon spc t y p e d spc o n spc s c r e e n ret"
 : >"$O/serial.log"
 (
+	for _ in $(seq 240); do grep -q SHOT_NOW "$O/serial.log" 2>/dev/null && break; sleep 1; done
+	sleep 6; printf 'screendump %s/screen.ppm\n' "$O" | socat - UNIX-CONNECT:"$S/mon" >/dev/null 2>&1 # the desktop, for human eyes
 	for _ in $(seq 240); do grep -q TYPE_NOW "$O/serial.log" 2>/dev/null && break; sleep 1; done
 	if [ "$("$ROOT/scripts/debug-server.py" send 'id -u; cat /proc/1/comm' --wait 30 | tr '\n' ' ')" = "0 systemd " ]; then echo "CHECK debug_command ok"; else echo "CHECK debug_command fail"; fi >"$S/host.checks"
 	grep -q 'agentos-kiosk' "$DEBUG_DIR/pi.log" && echo "CHECK debug_journal ok" >>"$S/host.checks" || echo "CHECK debug_journal fail" >>"$S/host.checks"
@@ -144,7 +167,7 @@ for k in sys.argv[2].split():
     s.sendall(b"sendkey %s\n" % k.encode()); time.sleep(0.08)
 time.sleep(0.5)' "$S/mon" "$KEYS"
 ) & KEYS_PID=$!
-timeout -s KILL 300 qemu-system-x86_64 -enable-kvm -cpu host -m 2048 -smp 2 -snapshot -no-reboot \
+timeout -s KILL 420 qemu-system-x86_64 -enable-kvm -cpu host -m 2048 -smp 2 -snapshot -no-reboot \
 	-drive if=pflash,format=raw,readonly=on,file=/usr/share/OVMF/OVMF_CODE_4M.fd -drive if=pflash,format=raw,file="$S/vars.fd" \
 	-drive file="$S/disk.img",if=virtio,format=raw -nic user,model=virtio-net-pci \
 	-vga none -device virtio-gpu-pci -device qemu-xhci -device usb-kbd -device usb-tablet -display none \

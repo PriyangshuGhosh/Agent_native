@@ -10,15 +10,17 @@ After=agentd-apps.socket agentd-apps-approve.socket
 [Service]
 ExecStart=/usr/bin/agentd apprunner
 User=agentos
-Environment=AGENTD_WORKSPACE=/home/agentos HOME=/home/agentos
+# AGENTD_TRUST_GENERATED: growth mode (the person's choice, 2026-11-14): learned capabilities run without a first-use
+# question; `agentd apps review` / `forget` are the review.
+Environment=AGENTD_WORKSPACE=/home/agentos HOME=/home/agentos AGENTD_TRUST_GENERATED=1
 Restart=on-failure
 RestartSec=2
 NoNewPrivileges=yes
 ProtectSystem=strict
 ReadWritePaths=/home/agentos
-IPAddressDeny=any
-# AF_NETLINK: bubblewrap brings up loopback in the empty network namespace it creates.
-RestrictAddressFamilies=AF_UNIX AF_NETLINK
+# Network stays for the agent's shell (pip, curl, as the person); application operations still run in bubblewrap
+# with --unshare-all, so they have none. AF_NETLINK: bubblewrap brings up loopback in the namespace it creates.
+RestrictAddressFamilies=AF_UNIX AF_NETLINK AF_INET AF_INET6
 ProtectKernelModules=yes
 ProtectControlGroups=yes
 MemoryMax=3G

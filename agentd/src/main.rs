@@ -259,7 +259,7 @@ fn parse_response(r: &Value) -> Res<(String, Vec<Directive>)> {
 
 /// A read's output depends on the system, and the broker verifies its own operations, so neither can be predicted.
 fn unpredictable(d: &Directive) -> bool {
-    d.action == "read" || d.action == "broker" || d.action == "app" || d.action == "learn"
+    ["read", "broker", "app", "learn", "shell"].contains(&d.action.as_str())
 }
 
 /// Schema and policy for one directive: tier/action pairing, allow-listed targets, every required param, a
@@ -283,6 +283,8 @@ fn check_directive(d: &Directive) -> Result<(), String> {
             && p.get("args").into_iter().flat_map(|a| a.as_array().into_iter().flatten()).filter_map(|x| x.as_str()?.split_once('='))
                 .filter_map(|(_, v)| step_ref(&json!(v))).all(|n| n < d.step),
         (2, "learn") => !d.target.is_empty() && d.target.len() <= 64 && d.target.bytes().all(|b| b.is_ascii_alphanumeric() || b"._-".contains(&b)),
+        // The person's own terminal, run by the app runner as the person (never root): the command line is stdin.
+        (2, "shell") => d.target == "/bin/sh" && strs(&["stdin"]),
         (1, "ffi_call") => d.target == FFI_LIB && FFI_ALLOW.contains(&p.get("symbol").and_then(Value::as_str).unwrap_or_default())
             && strs(&["input"]),
         _ => false,
@@ -373,6 +375,19 @@ fn app_call(d: &Directive, outs: &HashMap<u64, Value>, tty: &mut dyn Write) -> R
     Ok(v["output"].to_string())
 }
 
+/// Runs one command line through the app runner as the person (their account and folder, no root). The step
+/// fails on a non-zero exit, so the planner sees the output and can correct the command.
+fn shell_call(d: &Directive, outs: &HashMap<u64, Value>, tty: &mut dyn Write) -> Res<String> {
+    let cmd = param(d, "stdin", outs)?;
+    let sock = std::env::var("AGENTD_APPS_SOCK").unwrap_or_else(|_| APPS_SOCK.into());
+    let r = sock_call(&sock, "the application runner", "apps", &json!({"op": "shell", "cmd": cmd}), d, tty)?["output"].take();
+    let (code, out) = (r["exit"].as_i64().unwrap_or(-1), r["output"].as_str().unwrap_or("").to_string());
+    if code != 0 {
+        return Err(format!("exit {code}: {}", out.chars().rev().take(400).collect::<Vec<_>>().into_iter().rev().collect::<String>().trim()).into());
+    }
+    Ok(format!("$ {cmd}\n{out}"))
+}
+
 /// What the application runner knows, as text for the planner: capabilities, the person's files and their state,
 /// and recent changes the person made. Empty if the runner is not there.
 fn apps_context() -> String {
@@ -393,7 +408,8 @@ fn sock_call(path: &str, who: &str, via: &str, req: &Value, d: &Directive, tty: 
     let mut c = UnixStream::connect(path).map_err(|e| format!("{who} is not reachable: {e}"))?;
     c.set_read_timeout(Some(Duration::from_millis(200)))?;
     writeln!(c, "{req}")?;
-    let (end, mut got, mut chunk) = (Instant::now() + if via == "apps" { APPS_WAIT } else { BROKER_WAIT }, Vec::new(), [0u8; 4096]);
+    let wait = if via == "apps" { APPS_WAIT } else if req["op"] == "pkg.install" { INSTALL_WAIT } else { BROKER_WAIT };
+    let (end, mut got, mut chunk) = (Instant::now() + wait, Vec::new(), [0u8; 4096]);
     loop {
         stopped()?;
         if Instant::now() >= end {
@@ -446,6 +462,7 @@ fn run_step(d: &Directive, ui: &mut Option<(String, Connection, Node)>, outs: &H
             3 => { let (_, c, n) = ui.as_ref().unwrap(); json!(set_text(c, n, &param(d, "text", outs)?)?) }
             2 if d.action == "broker" => json!(broker_call(d, tty)?),
             2 if d.action == "app" => json!(app_call(d, outs, tty)?),
+            2 if d.action == "shell" => json!(shell_call(d, outs, tty)?),
             // Learning ends the plan on purpose: the planner must plan again, now knowing the new capabilities.
             2 if d.action == "learn" => return Err(learn_call(d, tty)?.into()),
             2 if d.action == "read" => {
@@ -822,6 +839,8 @@ const APPS_APPROVE_SOCK: &str = "/run/agentd-apps-approve.sock";
 /// An application operation may run for its 600 s cap, plus a 60 s approval.
 const APPS_WAIT: Duration = Duration::from_secs(700);
 const BROKER_WAIT: Duration = Duration::from_secs(110);
+/// A package install: 60 s approval, then apt over the network (the broker's own cap is 900 s).
+const INSTALL_WAIT: Duration = Duration::from_secs(1000);
 const GEMINI_URL: &str = "https://generativelanguage.googleapis.com/v1beta/models";
 /// systemd-timesyncd creates this once the clock has really been set this boot.
 const TIME_SYNCED: &str = "/run/systemd/timesync/synchronized";
@@ -832,7 +851,7 @@ const MODEL_DEFAULT: &str = "gemini-3.5-flash-lite,gemini-3.1-flash-lite,gemini-
 /// The planner contract. The model only proposes: parse_response/check_directive decide what runs.
 const PLANNER_PROMPT: &str = r#"You plan tasks for agentd, the agent of an OS. Reply with JSON only:
 {"task_id": "<short-kebab-id>", "directives": [<directive>, ...]}
-Three actions are available on this system. To transform text:
+These actions are available on this system. To transform text:
 {"task_id": "<same id>", "step": <1, 2, ...>, "tier": 2, "action": "pipe", "target": "/usr/bin/tr",
  "params": {"args": [<tr arguments, strings>], "stdin": "<text>" or "$N" for step N's output},
  "validation": {"expected_role": null, "precondition_state": {"path_exists": "/usr/bin/tr"},
@@ -856,6 +875,21 @@ pool.ntp.org, in.pool.ntp.org:
 {"task_id": "<same id>", "step": <1, 2, ...>, "tier": 2, "action": "broker", "target": "config.set_ntp", "params": {"args": ["systemd-timesyncd.service", "time.cloudflare.com"], "stdin": ""},
  "validation": {"expected_role": null, "precondition_state": {}, "expected_postcondition": {"output": ""}}}
 The broker writes the setting, restarts the service, checks what it loaded, and undoes the change if that does not match.
+The same broker installs software: the target is "pkg.install" and the only argument is a Debian package name (lower-case,
+as in apt). The person is asked to approve it on the console; later steps may then use the program from the shell:
+{"task_id": "<same id>", "step": <1, 2, ...>, "tier": 2, "action": "broker", "target": "pkg.install", "params": {"args": ["sl"], "stdin": ""},
+ "validation": {"expected_role": null, "precondition_state": {}, "expected_postcondition": {"output": ""}}}
+To run a command line as the person (their own account and home folder, never root; the same terminal they have), use the
+shell. The command goes in stdin; its output comes back and cannot be predicted; a non-zero exit fails the step and shows you
+the output, so you can correct the command in a repaired step:
+{"task_id": "<same id>", "step": <1, 2, ...>, "tier": 2, "action": "shell", "target": "/bin/sh", "params": {"args": [], "stdin": "ls -l ~/Documents | head"},
+ "validation": {"expected_role": null, "precondition_state": {}, "expected_postcondition": {"output": ""}}}
+Prefer an application capability when one fits the request; use the shell for everything else a terminal can do: files and
+folders, scripts (python3 is installed), pip, curl, and any installed program's command line. Keep each command short and
+check its result in the next step when it matters.
+To show a document on the person's screen in its application, run "agentd apps open <file>" in the shell (the file path is
+relative to the home folder). A package that is already installed needs no second install: if a command is "not found"
+right after its install succeeded, look for it with "command -v" or "dpkg -L <package>" instead of installing again.
 If the message is conversation, or a question you can answer without touching this system, reply
 {"task_id": "chat", "reply": "<your answer, in plain text>", "directives": []}
 If it asks for something on this system that these actions cannot do, reply {"task_id": "unsupported", "unsupported": "<why>", "directives": []}."#;
@@ -1120,6 +1154,7 @@ fn describe(v: &Value) -> Option<String> {
                 "applied_live" => format!("changed {} in its open window (checked there; not saved, that stays your decision)", path(&r, "path")),
                 "done" => format!("read: {}", r["data"]),
                 _ => r["outputs"].as_array().into_iter().flatten().map(|o| match o["state"].as_str() {
+                    Some("committed") if r["opened"].as_array().is_some_and(|a| a.contains(&o["path"])) => format!("saved {} (checked) and opened it on the screen", path(o, "path")),
                     Some("committed") => format!("saved {} (checked)", path(o, "path")),
                     _ => format!("did NOT replace {} because {}; my result is in {}", path(o, "path"), path(o, "why"), path(o, "kept_as")),
                 }).collect::<Vec<_>>().join("; "),
@@ -1127,6 +1162,8 @@ fn describe(v: &Value) -> Option<String> {
             format!("  ok  step {}: {what}", v["step"])
         }
         "STEP_VERIFIED" if v["action"] == "read" => format!("  ok  step {}:\n{}", v["step"], s("output")),
+        // The command and what it printed, as a terminal would show them (control characters stripped: model-chosen text).
+        "STEP_VERIFIED" if v["action"] == "shell" => format!("  ok  step {}:\n{}", v["step"], s("output").chars().filter(|c| !c.is_control() || *c == '\n' || *c == '\t').collect::<String>().trim_end()),
         "STEP_VERIFIED" => format!("  ok  step {}: {} -> {} (verified)", v["step"], s("action"), v["output"]),
         "REPLAN_TRIGGERED" if s("reason").contains("learned: ") => format!("  ++  {}\n      planning with the new capabilities (attempt {} of {})",
             s("reason").split("learned: ").nth(1).unwrap_or_default().chars().filter(|c| !c.is_control()).collect::<String>(), v["attempt"], v["budget"]),
@@ -1540,7 +1577,12 @@ mod tests {
             "params": {"args": ["a-z", "A-Z"], "stdin": "hi"}, "validation": {"expected_postcondition": {"output": "HI"}}});
         assert!(parse_response(&plan(json!([ok(1), ok(2)]))).is_ok());
         let bad = |edit: &dyn Fn(&mut Value)| { let mut d = ok(2); edit(&mut d); plan(json!([ok(1), d])) };
-        let cases: [(&str, &dyn Fn(&mut Value)); 17] = [
+        let sh = json!({"task_id": "x", "step": 2, "tier": 2, "action": "shell", "target": "/bin/sh", "params": {"args": [], "stdin": "ls"},
+            "validation": {"expected_postcondition": {"output": ""}}});
+        assert!(parse_response(&plan(json!([ok(1), sh]))).is_ok(), "a shell step is allowed");
+        let cases: [(&str, &dyn Fn(&mut Value)); 19] = [
+            ("shell through another interpreter", &|d| { d["action"] = json!("shell"); d["target"] = json!("/bin/bash") }),
+            ("shell without a command", &|d| { d["action"] = json!("shell"); d["target"] = json!("/bin/sh"); d["params"] = json!({"args": []}) }),
             ("read of a tool not on the list", &|d| { d["action"] = json!("read"); d["target"] = json!("/bin/sh") }),
             ("read of a transform-only tool", &|d| d["action"] = json!("read")),
             ("tier/action mismatch", &|d| d["action"] = json!("set_text")),

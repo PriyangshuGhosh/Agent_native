@@ -1,0 +1,5 @@
+#!/bin/sh
+# Runs inside labwc as the person: the panel (taskbar, launchers, clock) and the agent console as the first window.
+# Closing a window never ends the session; the panel's "Agent" and "Files" buttons reopen them. Ctrl+Alt+F2: tty2 login.
+waybar -c /etc/agentos/waybar.jsonc -s /etc/agentos/waybar.css &
+foot -o font=monospace:size=13 /usr/bin/agentd console &

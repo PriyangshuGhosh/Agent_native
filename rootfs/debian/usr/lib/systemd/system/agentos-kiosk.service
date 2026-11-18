@@ -1,14 +1,14 @@
 [Unit]
-Description=CUA-AgentOS console on the screen (cage kiosk: keyboard and mouse)
+Description=CUA-AgentOS console on the screen (labwc desktop: keyboard and mouse)
 After=agentd.socket systemd-user-sessions.service getty@tty1.service
 Conflicts=getty@tty1.service agentd-console.service
-# No usable display, or cage keeps crashing: the plain text prompt takes tty1 instead.
+# No usable display, or labwc keeps crashing: the plain text prompt takes tty1 instead.
 OnFailure=agentd-console.service
 StartLimitIntervalSec=60
 StartLimitBurst=3
 
 [Service]
-# A logind session on seat0 gives cage the display and input devices without root.
+# A logind session on seat0 gives labwc the display and input devices without root.
 User=agentos
 PAMName=login
 TTYPath=/dev/tty1
@@ -21,8 +21,8 @@ StandardError=journal
 UtmpIdentifier=tty1
 UtmpMode=user
 Environment=XDG_SESSION_TYPE=wayland LANG=C.UTF-8
-# -s keeps Ctrl+Alt+F2 working: tty2 is the recovery login.
-ExecStart=/usr/bin/cage -s -- /usr/bin/foot -o font=monospace:size=13 /usr/bin/agentd console
+# labwc keeps Ctrl+Alt+F2 working: tty2 is the recovery login.
+ExecStart=/usr/bin/labwc -s /usr/libexec/agentos/desktop-start
 Restart=always
 RestartSec=1
 

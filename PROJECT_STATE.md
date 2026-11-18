@@ -69,17 +69,38 @@ Keep replies short; update this file after each milestone.
 - [x] M3b Blender pack (`agentd/caps/blender*.{json,py}`): new_scene/script (bpy, approval), add_light, render, inspect, live bridge. VM-tested.
 - [ ] More packs / mechanisms: ImageMagick/ffmpeg (try via `learn`), GTK apps via `org.gtk.Actions`
 - [x] M4 VM test `tests/test-apps-vm.sh` passes 21/21.
-- [ ] M4b NEXT: image. `build-debian-img.sh` already edited (packages bubblewrap, libreoffice-writer, python3-uno,
-      `EXTRA_PKGS`; apps sockets enabled; `usermod` instead of `useradd`) but NOT built or booted. Still to design:
-      a real desktop (labwc instead of the cage kiosk) so the person can open apps beside the console; launch via
-      `agentd apps open` / .desktop overrides so sessions get the control socket; then see a live edit on a real screen
-      (`tests/test-debian-img.sh` has the on-screen test plumbing). Then `learn` with the live model in the VM test.
+- [x] M4b image booted on the real Pi 5 (2026-11-14, labwc + console): live Gemini tasks, `blender.new_scene` made
+      `hat.blend` (verified; 17 s) through the planner. Evidence: `build/debug/pi.log`.
+- [x] M4c desktop for the person (user request 2026-11-14: see the agent's work on the screen; files and apps by
+      mouse). FlowOS was asked for as a source: it is closed source (its site says so; early access Dec 2026), so nothing
+      could be taken. Done: waybar panel (`/etc/agentos/waybar.{jsonc,css}`: Agent/Files/Terminal/Writer/Blender
+      buttons, taskbar, clock), pcmanfm; a document double-click runs `agentd apps open` (`agentos-open.desktop` +
+      `/etc/xdg/mimeapps.list`) so the window has the control socket; the runner opens every committed output on the
+      desktop (`apps::run` -> `open(.., wait)`, joins `/run/user/<uid>/wayland-0`, sets `DISPLAY=:0`, reaps the child;
+      console says "opened it on the screen"), so later steps go live into that window. Xwayland is in the image.
+      **Pi 5 facts (measured 2026-11-14):** Debian's arm64 Blender 4.3 has only the X11 back-end, and it needs OpenGL
+      4.3 while the Pi 5 GPU (V3D 7.1) stops at 3.1 (`GLXBadFBConfig`; a GL override dies on "max 0 SSBO"), so Blender
+      is launched with `LIBGL_ALWAYS_SOFTWARE=1` (panel button and `blender.json` session launch; ~8 s to a window).
+      Evidence: `tests/test-debian-img.sh` 27/27 on amd64 (screenshots `build/evidence-2026-11-14/desktop-run{3,4}.png`:
+      the agent's Writer document open on the desktop); on the real Pi 5 "create a hat in blender" -> `hat.blend`
+      verified in 32 s and opened in Blender on screen (`"opened":["hat.blend"]`, bridge socket up); Writer documents
+      the same. Not yet seen on the Pi: a second step going live into the open Blender window. Then: `learn` with the live model.
+- [x] M4d growth (user request 2026-11-14, risk accepted by the user; they review afterwards): planner action Tier 2
+      `shell` (target `/bin/sh`, command in stdin) -> runner op `shell` (`apps::shell`): runs as the person, in their
+      home, not sandboxed, with network, 120 s cap, journalled in ops.jsonl. Broker op `pkg.install` (Debian package
+      name, always asks on the console, `agentd-pkg@<name>.service` runs apt-get, dpkg record is the check; rate limit
+      3 per 10 min). `AGENTD_TRUST_GENERATED=1` in agentd-apps.service: learned capabilities run without the first-use
+      question; `agentd apps review` / `forget <cap>`. Evidence: unit 21+6; `tests/test-debian-img.sh` 30/30 (run 8;
+      run 6 had one LibreOffice python segfault in create_text, run 7 the model answered the typed task differently:
+      both passed on rerun, neither understood further). Not yet on the Pi.
 - [ ] M5 GUI fallback for apps with no scriptable interface (AT-SPI code from the Alpine cycles)
 - [ ] M6 Pi 5: boot the arm64 image, resource measurements, power-pull test (needs the user's hands)
 - [ ] M7 local planner option (OpenAI-compatible endpoint; Hailo-10H compatibility must be measured, not assumed).
       Without any model the layer still works: `agentd apps run <cap> name=value` needs no network.
 - [ ] Older open items from `docs/RESUME.md`: health checks (chunk 6), updates/persistence, pinned image builds
-- [ ] Nothing from this session is committed yet (user has not asked). `git status` shows the work.
+- [x] 2026-11-18: Pi 5 card read back: 34 app operations on hardware (26 committed, 2 conflicts kept the human's file,
+      11 failed safely: approvals refused, model mistakes, all recovered or refused before running). `docs/pi5-results-2026-11-18.md`.
+      Released as `v2.0.0` (Pi 5 image `release/pi5/cua-agentos-pi5.img.xz` on GitHub; checksums in `release/pi5/SHA256SUMS`).
 
 ## Known limits of what exists (be honest about these)
 - Live route tested only against headless LibreOffice on the host (same UNO path a window uses); not yet seen on a screen.

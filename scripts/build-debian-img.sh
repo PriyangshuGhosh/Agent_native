@@ -6,7 +6,7 @@
 #   ARCH=arm64: build/debian-img/cua-agentos-pi5.img, MBR: FAT boot (Pi 5 EEPROM loader; Raspberry Pi kernel and Wi-Fi
 #               firmware from archive.raspberrypi.com) + ext4 root.
 # Both: the FAT partition is /boot/firmware, rootfs/debian/ is laid over the system, the screen shows the agent console
-# in a cage kiosk (keyboard and mouse; `wifi` joins a network) and tty2 keeps a login. Root is locked unless
+# on a labwc desktop with the agent console, a panel and a file manager (keyboard and mouse; `wifi` joins a network) and tty2 keeps a login. Root is locked unless
 # ROOT_PASSWORD_HASH is set (from `openssl passwd -6`). The Gemini key is never in the image: copy gemini.env (or the
 # bare key) onto the FAT partition and the first boot moves it to /etc/agentd/gemini.env.
 set -eu
@@ -23,9 +23,11 @@ DEB=$(DEB_ARCH=$ARCH "$ROOT/scripts/build-deb.sh")
 SOURCES="deb http://deb.debian.org/debian trixie main non-free-firmware
 deb http://deb.debian.org/debian trixie-updates main non-free-firmware
 deb http://security.debian.org/debian-security trixie-security main non-free-firmware"
-PKGS=systemd-sysv,dbus,polkitd,libpam-systemd,network-manager,wpasupplicant,systemd-timesyncd,cage,foot,fonts-dejavu-core
+# Desktop for the person: labwc (windows, keyboard, mouse), waybar (panel), pcmanfm (files; a double-click opens a
+# document through agentd so the agent works in that window), foot (console).
+PKGS=systemd-sysv,dbus,polkitd,libpam-systemd,network-manager,wpasupplicant,systemd-timesyncd,labwc,xwayland,waybar,foot,pcmanfm,xdg-utils,shared-mime-info,desktop-file-utils,adwaita-icon-theme,adwaita-icon-theme-legacy,fonts-dejavu-core
 # Application layer: the sandbox, and LibreOffice Writer as the first operated application. EXTRA_PKGS adds more (e.g. blender).
-PKGS=$PKGS,bubblewrap,libreoffice-writer,python3-uno${EXTRA_PKGS:+,$EXTRA_PKGS}
+PKGS=$PKGS,bubblewrap,libreoffice-writer,libreoffice-gtk3,python3-uno${EXTRA_PKGS:+,$EXTRA_PKGS}
 PKGS=$PKGS,libgl1-mesa-dri,libegl-mesa0,curl,ca-certificates,login,passwd,less,initramfs-tools
 KEYRINGS=--keyring=/usr/share/keyrings/debian-archive-keyring.gpg
 case $ARCH in
@@ -57,9 +59,9 @@ B=$O/boot-$ARCH
 rm -rf "$B" "$O/root-$ARCH.tar" && mkdir -p "$B"
 # The namespace's root is a subuid that cannot read this checkout, so files cross with tar-in/sync-out. The overlay goes
 # in before the packages, so their kernel and initramfs hooks already run /usr/libexec/agentos/update-boot.
-tar -C "$ROOT/rootfs/debian" --owner=0 --group=0 --mode=go-w --sort=name -cf "$O/overlay.tar" .
+tar -C "$ROOT/rootfs/debian" --owner=0 --group=0 --mode=go-w --sort=name -cf "$O/overlay-$ARCH.tar" .
 echo "$SOURCES" | mmdebstrap --mode=unshare --arch="$ARCH" --quiet $KEYRINGS --include="$PKGS" \
-	--essential-hook="tar-in '$O/overlay.tar' /" --essential-hook='mkdir -p "$1/boot/firmware"' \
+	--essential-hook="tar-in '$O/overlay-$ARCH.tar' /" --essential-hook='mkdir -p "$1/boot/firmware"' \
 	--customize-hook="copy-in '$DEB' /tmp" --customize-hook="chroot \"\$1\" sh -eu -c '
 		dpkg -i /tmp/$(basename "$DEB") && rm /tmp/$(basename "$DEB")
 		for v in \$(ls /lib/modules); do /usr/libexec/agentos/update-boot \$v; done
@@ -127,5 +129,5 @@ EOF
 fi
 dd if="$O/boot-$ARCH.vfat" of="$IMG" bs=1M seek=1 conv=notrunc,sparse status=none
 dd if="$O/root-$ARCH.ext4" of="$IMG" bs=1M seek=$((1 + BOOT_MB)) conv=notrunc,sparse status=none
-rm -rf "$B" "$O/overlay.tar" "$O/root-$ARCH.tar" "$O/root-$ARCH.ext4" "$O/boot-$ARCH.vfat"
+rm -rf "$B" "$O/overlay-$ARCH.tar" "$O/root-$ARCH.tar" "$O/root-$ARCH.ext4" "$O/boot-$ARCH.vfat"
 echo "$IMG"

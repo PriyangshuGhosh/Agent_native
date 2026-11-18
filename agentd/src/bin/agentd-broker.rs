@@ -59,24 +59,45 @@ enum Op {
     Restart,
     /// Point systemd-timesyncd at one of NTP_SERVERS: the only operation that changes a file.
     SetNtp,
+    /// Install one Debian package through the oneshot unit agentd-pkg@<name>.service (apt-get, as root, with
+    /// network), after the person says yes on the console. The person's choice (2026-11-14): software arrives
+    /// without a new image; they review what was installed afterwards.
+    Install,
 }
+
+/// Stands in for the unit of an install (the rate limit and the audit name it).
+static PKG_UNIT: Unit = Unit { name: "agentd-pkg@.service", approval: None };
+const INSTALL_TIMEOUT: Duration = Duration::from_secs(900);
 
 struct Req {
     op: Op,
     unit: &'static Unit,
     /// The allowlisted server for SetNtp: a &'static str, so no byte of the request is ever written or run.
     value: Option<&'static str>,
+    /// The package for Install: the one request byte sequence that reaches a command line, checked by `package_name`.
+    pkg: Option<String>,
     task_id: String,
     step: u64,
 }
 
+/// A Debian package name as apt accepts it, restricted to what a systemd instance name can carry unescaped.
+/// shortcut: names with '+' (g++) are refused; add systemd-escape when one is wanted.
+fn package_name(s: &str) -> bool {
+    (2..=64).contains(&s.len()) && s.as_bytes()[0].is_ascii_lowercase() && !s.contains("..")
+        && s.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'.' || b == b'-')
+}
+
 impl Req {
-    /// Only a restart needs one: SetNtp is reversible, verified, and limited to the compiled-in server list.
-    fn approval(&self) -> Option<&'static str> {
-        if self.op == Op::Restart { self.unit.approval } else { None }
+    /// A restart of a unit that says so, and every install: SetNtp is reversible, verified, and limited to the list.
+    fn approval(&self) -> Option<String> {
+        match self.op {
+            Op::Restart => self.unit.approval.map(String::from),
+            Op::Install => Some(format!("Install the Debian package \"{}\" (apt-get, as root, from the Debian archive). It stays on this system until it is removed.", self.pkg.as_deref().unwrap_or("?"))),
+            _ => None,
+        }
     }
     fn detail(&self) -> Value {
-        json!({"op": format!("{:?}", self.op), "unit": self.unit.name, "value": self.value,
+        json!({"op": format!("{:?}", self.op), "unit": self.unit.name, "value": self.value, "package": self.pkg,
                "task_id": self.task_id, "step": self.step})
     }
 }
@@ -90,6 +111,7 @@ fn parse(line: &str) -> Result<Req, String> {
         Some("service.status") => Op::Status,
         Some("service.restart") => Op::Restart,
         Some("config.set_ntp") => Op::SetNtp,
+        Some("pkg.install") => Op::Install,
         _ => return Err("unknown operation".into()),
     };
     let fields: &[&str] = match op {
@@ -100,7 +122,12 @@ fn parse(line: &str) -> Result<Req, String> {
         return Err(format!("fields must be exactly {}", fields.join(", ")));
     }
     let name = o["unit"].as_str().ok_or("unit is not a string")?;
-    let unit = UNITS.iter().find(|u| u.name == name).ok_or("unit is not on the allowlist")?;
+    // For an install, "unit" (agentd's first argument) carries the package name.
+    let (unit, pkg) = match op {
+        Op::Install if package_name(name) => (&PKG_UNIT, Some(name.to_string())),
+        Op::Install => return Err("that is not a Debian package name".into()),
+        _ => (UNITS.iter().find(|u| u.name == name).ok_or("unit is not on the allowlist")?, None),
+    };
     let value = match op {
         Op::SetNtp if unit.name != TIMESYNCD => return Err(format!("config.set_ntp applies to {TIMESYNCD}")),
         Op::SetNtp => Some(*NTP_SERVERS.iter().find(|s| Some(**s) == o["value"].as_str())
@@ -112,7 +139,7 @@ fn parse(line: &str) -> Result<Req, String> {
         return Err("bad task_id".into());
     }
     let step = o["step"].as_u64().ok_or("step is not a number")?;
-    Ok(Req { op, unit, value, task_id: task_id.to_string(), step })
+    Ok(Req { op, unit, value, pkg, task_id: task_id.to_string(), step })
 }
 
 /// Forgets restarts older than the window; true if another would exceed the limit.
@@ -255,7 +282,21 @@ fn set_ntp(server: &str, peer: u32) -> Result<String, String> {
 }
 
 /// Precondition: the unit is loaded. Postcondition of a restart: it is active again, with a newer start time.
+/// `systemctl start` of the oneshot returns when apt is done; dpkg's own record is the check, not apt's exit code.
+fn install_pkg(pkg: &str) -> Result<String, String> {
+    run(&[SYSTEMCTL, "start", "--no-ask-password", "--", &format!("agentd-pkg@{pkg}.service")], INSTALL_TIMEOUT)
+        .map_err(|e| format!("apt-get could not install {pkg}: {e}"))?;
+    let st = run(&["/usr/bin/dpkg-query", "-W", "-f=${Status} ${Version}", "--", pkg], SHOW_TIMEOUT).unwrap_or_default();
+    match st.strip_prefix("install ok installed ") {
+        Some(v) => Ok(format!("Installed {pkg} {}.", v.trim())),
+        None => Err(format!("{pkg} is not installed afterwards (dpkg: {})", st.trim())),
+    }
+}
+
 fn execute(r: &Req, peer: u32) -> Result<String, String> {
+    if r.op == Op::Install {
+        return install_pkg(r.pkg.as_deref().ok_or("no package")?);
+    }
     let name = r.unit.name;
     let before = show(name)?;
     if field(&before, "LoadState") != "loaded" {
@@ -264,7 +305,7 @@ fn execute(r: &Req, peer: u32) -> Result<String, String> {
     match r.op {
         Op::Status => return Ok(format!("{name} is {} ({})", field(&before, "ActiveState"), field(&before, "SubState"))),
         Op::SetNtp => return set_ntp(r.value.ok_or("no server")?, peer),
-        Op::Restart => {}
+        Op::Restart | Op::Install => {}
     }
     run(&[SYSTEMCTL, "restart", "--no-ask-password", "--", name], RESTART_TIMEOUT)?;
     let after = show(name)?;
@@ -276,7 +317,7 @@ fn execute(r: &Req, peer: u32) -> Result<String, String> {
 
 struct Pending {
     id: u64,
-    text: &'static str,
+    text: String,
     /// (allowed, uid of the person's console)
     answer: Option<(bool, u32)>,
 }
@@ -295,7 +336,7 @@ enum Verdict {
 }
 
 /// One approval at a time: requests are handled serially. Clearing `pending` here is what makes a late answer miss.
-fn wait_for_person(c: &UnixStream, s: &Shared, id: u64, text: &'static str) -> Verdict {
+fn wait_for_person(c: &UnixStream, s: &Shared, id: u64, text: String) -> Verdict {
     *s.pending.lock().unwrap() = Some(Pending { id, text, answer: None });
     reply(c, &json!({"status": "approval_required", "id": id}));
     let end = Instant::now() + APPROVAL_TIMEOUT;
@@ -383,7 +424,7 @@ fn answer(c: UnixStream, s: &Shared) {
     let Some(id) = serde_json::from_str::<Value>(&line).ok().and_then(|v| v["id"].as_u64()) else {
         return reply(&c, &json!({"error": "bad request"}));
     };
-    let text = s.pending.lock().unwrap().as_ref().filter(|p| p.id == id && p.answer.is_none()).map(|p| p.text);
+    let text = s.pending.lock().unwrap().as_ref().filter(|p| p.id == id && p.answer.is_none()).map(|p| p.text.clone());
     let Some(text) = text else {
         return reply(&c, &json!({"error": "that request is not waiting for an answer"}));
     };
@@ -451,6 +492,18 @@ mod tests {
             assert_eq!(parse(&req("service.status", u.name)).unwrap().op, Op::Status);
             assert_eq!(parse(&req("service.restart", u.name)).unwrap().op, Op::Restart);
         }
+    }
+
+    #[test]
+    fn install_takes_a_package_name_and_always_asks() {
+        let r = parse(&req("pkg.install", "sl")).unwrap();
+        assert_eq!((r.op, r.pkg.as_deref()), (Op::Install, Some("sl")));
+        assert!(r.approval().unwrap().contains("\"sl\""), "the person is asked, naming the package");
+        for bad in ["", "s", "Sl", "sl;rm", "sl --reinstall", "../x", "g++", "-x", "sl\n", &"a".repeat(65), "cron.service" /* a unit is fine, but as a package it is not special */] {
+            let ok = parse(&req("pkg.install", bad)).is_ok();
+            assert_eq!(ok, bad == "cron.service", "{bad:?}");
+        }
+        assert!(parse(&req("pkg.install", "cron.service")).unwrap().pkg.is_some());
     }
 
     #[test]

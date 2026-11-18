@@ -10,3 +10,4 @@
 *.qcow2
 target/
 __pycache__/
+*.img.xz
