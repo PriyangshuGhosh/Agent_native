@@ -84,7 +84,12 @@ Order (each item is done only when its check passes in the VM, then on the Pi):
 - P1 + first part of P2, VM evidence (2026-11-21): `tests/test-debian-img.sh` 39/39 on amd64 (`build/debian-img-run.log`):
       gdm, gnome-initial-setup (no account in the image), per-person runner `agentd-apps@<uid>` started at login,
       key step only without a key, Settings/lock/Files with the agent stopped, live tasks, Wi-Fi from the person's session.
-      Not yet on the Pi 5; idle RAM not measured.
+      Pi 5 (2026-11-22, `build/debug/pi.log` from line 51540): GNOME Shell (mutter 48.7) on V3D hardware (gbm, no
+      llvmpipe); gnome-initial-setup made the account (sudo + agentd-users), key imported, AGENTD_READY planner live,
+      runner socket at login. Idle after login: 753 MB used of 8 GB (gnome-shell 225 MB RSS). Open: no locales besides
+      C.utf8 (language choice fails, no /etc/default/locale); no rtkit; runner socket also starts for the
+      gnome-initial-setup system user (uid 104).
+- **Next session: read `docs/next-2026-11-23.md`** (Pi 5 complaints: slow, camera, no local model, agent does not ask+install; small fixes).
 - Outside critique (2026-11-21), triaged against this roadmap: `docs/critique-2026-11-21.md`.
 - Ongoing: chunk 6 health monitor (feeds P4's automatic fallback), Pi power pull, M5 AT-SPI GUI fallback, more packs.
 
