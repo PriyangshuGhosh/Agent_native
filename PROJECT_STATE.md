@@ -81,6 +81,11 @@ Order (each item is done only when its check passes in the VM, then on the Pi):
       (the user's hands), Pi SD/NVMe images, CI running `tests/regress.sh` + VM tests, versioned signed releases.
 - [ ] P9 hardening: nftables default-deny incoming, AppArmor for agentd/broker/runner, optional LUKS on data,
       Secure Boot (amd64), per-user key storage instead of `/etc/agentd/gemini.env`.
+- P1 + first part of P2, VM evidence (2026-11-21): `tests/test-debian-img.sh` 39/39 on amd64 (`build/debian-img-run.log`):
+      gdm, gnome-initial-setup (no account in the image), per-person runner `agentd-apps@<uid>` started at login,
+      key step only without a key, Settings/lock/Files with the agent stopped, live tasks, Wi-Fi from the person's session.
+      Not yet on the Pi 5; idle RAM not measured.
+- Outside critique (2026-11-21), triaged against this roadmap: `docs/critique-2026-11-21.md`.
 - Ongoing: chunk 6 health monitor (feeds P4's automatic fallback), Pi power pull, M5 AT-SPI GUI fallback, more packs.
 
 ## Progress

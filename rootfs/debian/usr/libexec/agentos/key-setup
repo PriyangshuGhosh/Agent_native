@@ -1,0 +1,19 @@
+#!/bin/sh
+# First login of a person while the agent has no Gemini key: offer to add one (optional; the desktop works without it).
+# Asked once per person; the "Agent Key" app (--again) asks any time. The key goes to import-key on stdin through
+# pkexec (an administrator's password), never on a command line or in a log.
+set -u
+[ "$(id -u)" -ge 1000 ] || exit 0 # not the greeter or gnome-initial-setup
+mark=${XDG_CONFIG_HOME:-$HOME/.config}/agentos/key-asked
+if [ "${1-}" != --again ]; then
+	[ -e "$mark" ] || [ -e /etc/agentd/gemini.env ] && exit 0
+	mkdir -p "${mark%/*}" && : >"$mark"
+fi
+key=$(zenity --entry --hide-text --title='Agent' --width=460 \
+	--text='Paste your Gemini API key to let the agent plan tasks (optional).\nWithout it the desktop works normally and the agent answers only simple requests.') || exit 0
+[ -n "$key" ] || exit 0
+if printf 'GEMINI_API_KEY=%s\n' "$key" | pkexec /usr/libexec/agentos/import-key -; then
+	zenity --info --title='Agent' --text='The key is saved. The agent can plan tasks now.'
+else
+	zenity --error --title='Agent' --text='The key was not saved (wrong format, or the password was refused). Open "Agent Key" to try again.'
+fi

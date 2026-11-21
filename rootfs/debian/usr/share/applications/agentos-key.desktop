@@ -1,0 +1,7 @@
+[Desktop Entry]
+Type=Application
+Name=Agent Key
+Comment=Add or replace the Gemini key the agent plans with
+Exec=/usr/libexec/agentos/key-setup --again
+Icon=dialog-password
+Categories=Settings;

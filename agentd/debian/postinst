@@ -4,18 +4,21 @@ if [ "$1" = configure ]; then
 	getent group agentd-users >/dev/null || groupadd --system agentd-users
 	getent group agentd-broker >/dev/null || groupadd --system agentd-broker
 	getent group agentd-apps >/dev/null || groupadd --system agentd-apps
-	# The person's account: the application runner works as this user, on this user's files.
-	getent passwd agentos >/dev/null || useradd -m -G agentd-users -s /usr/sbin/nologin agentos
 	# The one config tree config.set_ntp writes; the broker's unit makes it writable, so it must exist first.
 	install -d -m 755 /etc/systemd/timesyncd.conf.d
 fi
 if [ "$1" = configure ] && [ -d /run/systemd/system ]; then
 	systemctl daemon-reload
-	systemctl enable agentd.socket agentd.service agentd-broker.socket agentd-approve.socket agentd-broker-recover.service agentd-apps.socket agentd-apps-approve.socket
-	systemctl start agentd-broker-recover.service agentd.socket agentd-broker.socket agentd-approve.socket agentd-apps.socket agentd-apps-approve.socket
-	systemctl try-restart agentd-broker.service agentd-apps.service
-	if [ -e /usr/lib/systemd/system/agentos-kiosk.service ]; then
-		# The image's kiosk owns tty1, and starting the text console would stop it.
+	systemctl enable agentd.socket agentd.service agentd-broker.socket agentd-approve.socket agentd-broker-recover.service
+	systemctl start agentd-broker-recover.service agentd.socket agentd-broker.socket agentd-approve.socket
+	systemctl try-restart agentd-broker.service 'agentd-apps@*.service'
+	# Each person's application runner comes up at login; people logged in now get theirs here.
+	for d in /run/user/*; do
+		u=${d##*/}
+		if [ "$u" -ge 1000 ] 2>/dev/null; then systemctl start "agentd-apps@$u.socket" "agentd-apps-approve@$u.socket"; fi
+	done
+	if [ -e /etc/systemd/system/display-manager.service ] || [ -e /usr/lib/systemd/system/agentos-kiosk.service ]; then
+		# A desktop owns tty1, and starting the text console would stop it.
 		systemctl restart agentd.service
 	else
 		systemctl enable agentd-console.service

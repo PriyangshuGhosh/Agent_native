@@ -1,0 +1,10 @@
+# A new account (gnome-initial-setup, GNOME Settings, adduser) becomes a person who can use the agent.
+[Unit]
+Description=Give new people access to the agent
+
+[Path]
+PathChanged=/etc/passwd
+Unit=agentos-people.service
+
+[Install]
+WantedBy=paths.target

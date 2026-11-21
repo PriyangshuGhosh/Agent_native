@@ -18,7 +18,7 @@ S=$(mktemp -d "$O/seed.XXXXXX")
 trap 'rm -rf "$S"' EXIT INT TERM
 umask 077
 cp "$DEB" "$S/agentd.deb"
-EXPECT="installed runner_not_root runner_socket_group_only capability_committed file_owned_by_person state_verified
+EXPECT="installed runner_not_root runner_socket_group_only approvals_person_only capability_committed file_owned_by_person state_verified
 	context_lists_capabilities external_change_seen bad_path_refused pdf_made"
 if [ -r "$KEY_FILE" ]; then
 	printf 'GEMINI_API_KEY=%s\n' "$(tr -d ' \r\n' <"$KEY_FILE")" >"$S/gemini.env"
@@ -42,12 +42,18 @@ client() { setpriv --reuid=nobody --regid=nogroup --groups="$(getent group agent
 export DEBIAN_FRONTEND=noninteractive
 apt-get update -q >/dev/null 2>&1
 apt-get install -y -q --no-install-recommends /mnt/seed/agentd.deb libreoffice-writer python3-uno jq >/dev/null 2>&1
-systemctl is-active -q agentd-apps.socket && command -v soffice >/dev/null && command -v bwrap >/dev/null; check installed $?
+# The person (on the image, gnome-initial-setup makes the account and login starts the runner; here, by hand).
+useradd -m agentos && export APPS_UID=$(id -u agentos) && systemctl start agentd-apps@$APPS_UID.socket agentd-apps-approve@$APPS_UID.socket
+systemctl is-active -q agentd-apps@$APPS_UID.socket && command -v soffice >/dev/null && command -v bwrap >/dev/null; check installed $?
 
 R=$(client '{"op":"run","cap":"libreoffice.create_text","args":{"output":"report.odt","title":"Quarterly report","body":"Sales rose 4 percent."}}'); echo "$R"
 printf "%s" "$R" | jq -e '.status=="ok" and .output.state=="committed" and (.output.checks|length==3)' >/dev/null; check capability_committed $?
-pid=$(systemctl show -p MainPID --value agentd-apps); [ "$pid" -gt 0 ] && [ "$(ps -o user= -p "$pid")" = agentos ]; check runner_not_root $?
+pid=$(systemctl show -p MainPID --value agentd-apps@$APPS_UID); [ "$pid" -gt 0 ] && [ "$(ps -o user= -p "$pid")" = agentos ]; check runner_not_root $?
 ! setpriv --reuid=nobody --regid=nogroup --clear-groups python3 /mnt/seed/appsclient.py '{"op":"context"}' >/dev/null 2>&1; check runner_socket_group_only $?
+# Approvals: only the person reaches their approval socket (not agentd, not the console group, not other people).
+! setpriv --reuid=nobody --regid=nogroup --groups="$(getent group agentd-users | cut -d: -f3),$(getent group agentd-apps | cut -d: -f3)" \
+	python3 -c 'import socket,sys; socket.socket(socket.AF_UNIX).connect(sys.argv[1])' /run/agentd-apps/$APPS_UID.approve.sock 2>/dev/null
+check approvals_person_only $?
 [ "$(stat -c %U "$H/report.odt")" = agentos ]; check file_owned_by_person $?
 jq -e '."report.odt".status=="verified" and ."report.odt".writer=="agent"' "$H/.agentd/world.json" >/dev/null; check state_verified $?
 runuser -u agentos -- sh -c "echo 'my notes' > $H/notes.txt"
@@ -62,8 +68,8 @@ if [ -e /mnt/seed/blender ]; then
 	NEW='{"op":"run","cap":"blender.new_scene","args":{"output":"scene.blend","code":"import bpy\nbpy.ops.mesh.primitive_cube_add(location=(0,0,1))\nbpy.ops.mesh.primitive_plane_add(size=20)\nbpy.ops.object.camera_add(location=(7,-7,5), rotation=(1.1,0,0.785))\nbpy.context.scene.camera=bpy.context.object\n"}}'
 	# a script is never run without the person's yes: with nobody answering it is refused (60 s)
 	client "$NEW" | grep -q 'not approved' && [ ! -e $H/scene.blend ]; check blender_script_needs_yes $?
-	# from here a stand-in for the person at the console says yes (group agentd-users, which agentd is not in)
-	setpriv --reuid=nobody --regid=nogroup --groups="$(getent group agentd-users | cut -d: -f3)" python3 /mnt/seed/appsclient.py --approver &
+	# from here the person says yes at their console (only they can reach their approval socket)
+	runuser -u agentos -- python3 /mnt/seed/appsclient.py --approver &
 	R=$(client "$NEW"); echo "$R" | cut -c1-600
 	printf "%s" "$R" | jq -e '.output.state=="committed"' >/dev/null; check blender_scene_created $?
 	R=$(client '{"op":"run","cap":"blender.add_light","args":{"file":"scene.blend","name":"Key","kind":"SUN","x":"4","y":"-4","z":"6","strength":"3"}}'); echo "$R" | cut -c1-600
@@ -102,7 +108,7 @@ if [ -r /mnt/seed/gemini.env ]; then
 		echo "$out" | cut -c1-1500
 		[ $rc = 0 ] && [ "$(head -c 4 $H/room.png | tail -c 3)" = PNG ] && runuser -u agentos -- env HOME=$H AGENTD_WORKSPACE=$H agentd apps state room.blend | tee /run/room.state | jq -e '(.structure.data.lights|length>=1) and (.structure.data.meshes|length>=2) and (.structure.data.cameras|length>=1)' >/dev/null; check blender_planned_scene_rendered $?; jq -c .structure.data /run/room.state
 	fi
-	journalctl -u agentd-apps -o cat --no-pager | tail -15
+	journalctl -u agentd-apps@$APPS_UID -o cat --no-pager | tail -15
 fi
 GUEST
 xorriso -as mkisofs -quiet -V cidata -J -r -o "$S/seed.iso" "$S/user-data" "$S/meta-data" "$S/guest.sh" "$S/agentd.deb" "$ROOT/tests/appsclient.py" \

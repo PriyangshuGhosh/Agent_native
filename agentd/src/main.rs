@@ -18,7 +18,7 @@ use std::os::unix::net::{UnixListener, UnixStream};
 use std::os::unix::process::CommandExt;
 use std::path::{Component, Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::sync::atomic::{AtomicBool, AtomicI32, Ordering::SeqCst};
+use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU32, Ordering::SeqCst};
 use std::sync::mpsc;
 use std::thread::sleep;
 use std::time::{Duration, Instant};
@@ -371,7 +371,7 @@ fn app_call(d: &Directive, outs: &HashMap<u64, Value>, tty: &mut dyn Write) -> R
         };
         args.insert(k.to_string(), json!(v));
     }
-    let sock = std::env::var("AGENTD_APPS_SOCK").unwrap_or_else(|_| APPS_SOCK.into());
+    let sock = apps_sock();
     let v = sock_call(&sock, "the application runner", "apps", &json!({"op": "run", "cap": d.target, "args": args}), d, tty)?;
     Ok(v["output"].to_string())
 }
@@ -380,7 +380,7 @@ fn app_call(d: &Directive, outs: &HashMap<u64, Value>, tty: &mut dyn Write) -> R
 /// fails on a non-zero exit, so the planner sees the output and can correct the command.
 fn shell_call(d: &Directive, outs: &HashMap<u64, Value>, tty: &mut dyn Write) -> Res<String> {
     let cmd = param(d, "stdin", outs)?;
-    let sock = std::env::var("AGENTD_APPS_SOCK").unwrap_or_else(|_| APPS_SOCK.into());
+    let sock = apps_sock();
     let r = sock_call(&sock, "the application runner", "apps", &json!({"op": "shell", "cmd": cmd}), d, tty)?["output"].take();
     let (code, out) = (r["exit"].as_i64().unwrap_or(-1), r["output"].as_str().unwrap_or("").to_string());
     if code != 0 {
@@ -392,7 +392,7 @@ fn shell_call(d: &Directive, outs: &HashMap<u64, Value>, tty: &mut dyn Write) ->
 /// What the application runner knows, as text for the planner: capabilities, the person's files and their state,
 /// and recent changes the person made. Empty if the runner is not there.
 fn apps_context() -> String {
-    let sock = std::env::var("AGENTD_APPS_SOCK").unwrap_or_else(|_| APPS_SOCK.into());
+    let sock = apps_sock();
     (|| -> Res<String> {
         let mut c = UnixStream::connect(&sock)?;
         c.set_read_timeout(Some(Duration::from_secs(20)))?;
@@ -835,8 +835,37 @@ const SOCK: &str = "/run/agentd.sock";
 const BROKER_SOCK: &str = "/run/agentd-broker.sock";
 const APPROVE_SOCK: &str = "/run/agentd-approve.sock";
 /// Longer than the broker can take: 5 s to read, 60 s for a person, 30 s to restart, 5 s for each status check.
-const APPS_SOCK: &str = "/run/agentd-apps.sock";
-const APPS_APPROVE_SOCK: &str = "/run/agentd-apps-approve.sock";
+/// Each person has their own application runner (`agentd-apps@<uid>`), at `<uid>.sock` (agentd) and `<uid>.approve.sock`
+/// (only that person) in this directory.
+const APPS_DIR: &str = "/run/agentd-apps";
+/// Whose runner the current request uses: the uid that sent it (serve handles one request at a time).
+static APPS_UID: AtomicU32 = AtomicU32::new(u32::MAX);
+
+/// The runner socket (`kind`: "sock" or "approve.sock") for `uid`. A person only ever gets their own. Root (`agentd ask`)
+/// acts for the one person who has a runner; with none or several it gets its own path, which does not exist, so app
+/// steps fail with nothing run.
+fn runner_sock(dir: &str, uid: u32, kind: &str) -> String {
+    if uid == 0 {
+        let people: Vec<u32> = fs::read_dir(dir).into_iter().flatten().flatten()
+            .filter_map(|e| e.file_name().to_str()?.strip_suffix(".sock")?.parse().ok()).filter(|&u| u >= 1000).collect();
+        if let [u] = people[..] {
+            return format!("{dir}/{u}.{kind}");
+        }
+    }
+    format!("{dir}/{uid}.{kind}")
+}
+
+fn apps_sock() -> String {
+    std::env::var("AGENTD_APPS_SOCK").unwrap_or_else(|_| runner_sock(APPS_DIR, APPS_UID.load(SeqCst), "sock"))
+}
+
+fn peer_uid(c: &UnixStream) -> u32 {
+    use std::os::fd::AsRawFd;
+    let mut cred = libc::ucred { pid: 0, uid: u32::MAX, gid: 0 };
+    let mut len = size_of::<libc::ucred>() as libc::socklen_t;
+    unsafe { libc::getsockopt(c.as_raw_fd(), libc::SOL_SOCKET, libc::SO_PEERCRED, (&raw mut cred).cast(), &mut len) };
+    cred.uid
+}
 /// An application operation may run for its 600 s cap, plus a 60 s approval.
 const APPS_WAIT: Duration = Duration::from_secs(700);
 const BROKER_WAIT: Duration = Duration::from_secs(110);
@@ -945,7 +974,7 @@ the text files you give as inputs; a manifest whose selftest fails is discarded,
 fn learn_call(d: &Directive, tty: &mut dyn Write) -> Res<String> {
     let key = std::env::var("GEMINI_API_KEY").ok().filter(|k| config_safe(k)).ok_or("planner unavailable: learning needs the model")?;
     let model = std::env::var("AGENTD_MODEL").unwrap_or_else(|_| MODEL_DEFAULT.into());
-    let sock = std::env::var("AGENTD_APPS_SOCK").unwrap_or_else(|_| APPS_SOCK.into());
+    let sock = apps_sock();
     let ev = sock_call(&sock, "the application runner", "apps", &json!({"op": "probe", "app": d.target}), d, tty)?["output"].take();
     let evidence = json!({"binary": ev["binary"], "version": ev["version"], "description": ev["description"], "hints": ev["hints"],
                           "help": ev["help"], "man": ev["man"]});
@@ -1057,6 +1086,7 @@ fn serve() -> Res<()> {
                                      ("planner", json!(planner)), ("tiers", json!(router.tiers()))]);
     for conn in listener.incoming() {
         let Ok(mut c) = conn else { continue };
+        APPS_UID.store(peer_uid(&c), SeqCst);
         let _ = c.set_read_timeout(Some(Duration::from_secs(5)));
         let mut intent = String::new();
         let _ = BufReader::new((&c).take(MAX_REQUEST)).read_line(&mut intent);
@@ -1324,7 +1354,7 @@ Today it can transform text and read the date, disk space, memory, uptime and sy
 /// Shows the broker's own text and passes the person's answer straight to it; agentd never sees or carries the answer.
 fn approve(v: &Value, input: &mut impl BufRead) -> Res<()> {
     let id = v["id"].as_u64().ok_or("no request id")?;
-    let mut b = UnixStream::connect(if v["via"] == "apps" { APPS_APPROVE_SOCK } else { APPROVE_SOCK })?;
+    let mut b = UnixStream::connect(if v["via"] == "apps" { runner_sock(APPS_DIR, unsafe { libc::getuid() }, "approve.sock") } else { APPROVE_SOCK.into() })?;
     writeln!(b, "{}", json!({"id": id}))?;
     let mut line = String::new();
     BufReader::new(b.try_clone()?).read_line(&mut line)?;
@@ -1640,6 +1670,23 @@ mod tests {
         let declined = json!({"candidates": [{"content": {"parts": [{"text":
             r#"{"task_id": "unsupported", "unsupported": "no such action", "directives": []}"#}]}}]});
         assert!(parse_response(&declined).err().unwrap().to_string().contains("no such action"), "an empty plan is never a success");
+    }
+
+    #[test]
+    fn runner_is_the_requesters_own() {
+        let d = std::env::temp_dir().join(format!("agentd-runners-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&d);
+        fs::create_dir_all(&d).unwrap();
+        let dir = d.to_str().unwrap();
+        for f in ["1000.sock", "1000.approve.sock", "120.sock"] {
+            fs::write(d.join(f), "").unwrap();
+        }
+        // A person gets only their own, even if it does not exist; root gets the one person's (system uids ignored).
+        assert_eq!(runner_sock(dir, 1001, "sock"), format!("{dir}/1001.sock"));
+        assert_eq!(runner_sock(dir, 0, "approve.sock"), format!("{dir}/1000.approve.sock"));
+        fs::write(d.join("1001.sock"), "").unwrap();
+        assert_eq!(runner_sock(dir, 0, "sock"), format!("{dir}/0.sock")); // two people: root must ask as one of them
+        fs::remove_dir_all(&d).unwrap();
     }
 
     #[test]

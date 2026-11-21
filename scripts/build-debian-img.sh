@@ -5,8 +5,9 @@
 #   ARCH=amd64 (default): build/debian-img/cua-agentos-amd64.img, GPT: ESP (systemd-boot, UEFI only) + ext4 root.
 #   ARCH=arm64: build/debian-img/cua-agentos-pi5.img, MBR: FAT boot (Pi 5 EEPROM loader; Raspberry Pi kernel and Wi-Fi
 #               firmware from archive.raspberrypi.com) + ext4 root.
-# Both: the FAT partition is /boot/firmware, rootfs/debian/ is laid over the system, the screen shows the agent console
-# on a labwc desktop with the agent console, a panel and a file manager (keyboard and mouse; `wifi` joins a network) and tty2 keeps a login. Root is locked unless
+# Both: the FAT partition is /boot/firmware, rootfs/debian/ is laid over the system, the screen shows GNOME (gdm). There is
+# no account in the image: the first boot runs gnome-initial-setup (language, keyboard, Wi-Fi, the person's account), then
+# the first login offers the Gemini key step. The agent is the "Agent" app in the dock. Root is locked unless
 # ROOT_PASSWORD_HASH is set (from `openssl passwd -6`). The Gemini key is never in the image: copy gemini.env (or the
 # bare key) onto the FAT partition and the first boot moves it to /etc/agentd/gemini.env.
 set -eu
@@ -23,9 +24,9 @@ DEB=$(DEB_ARCH=$ARCH "$ROOT/scripts/build-deb.sh")
 SOURCES="deb http://deb.debian.org/debian trixie main non-free-firmware
 deb http://deb.debian.org/debian trixie-updates main non-free-firmware
 deb http://security.debian.org/debian-security trixie-security main non-free-firmware"
-# Desktop for the person: labwc (windows, keyboard, mouse), waybar (panel), pcmanfm (files; a double-click opens a
-# document through agentd so the agent works in that window), foot (console).
-PKGS=systemd-sysv,dbus,polkitd,libpam-systemd,network-manager,wpasupplicant,systemd-timesyncd,labwc,xwayland,waybar,foot,pcmanfm,xdg-utils,shared-mime-info,desktop-file-utils,adwaita-icon-theme,adwaita-icon-theme-legacy,fonts-dejavu-core
+# Desktop for the person: GNOME (works without the agent). Nautilus double-click on a document opens it through agentd so
+# the agent works in that window. zenity + pkexec: the key step. dconf-cli: the dock defaults.
+PKGS=systemd-sysv,dbus,polkitd,libpam-systemd,network-manager,wpasupplicant,systemd-timesyncd,gnome-core,gdm3,gnome-initial-setup,gnome-console,zenity,pkexec,dconf-cli,xwayland,xdg-utils,shared-mime-info,desktop-file-utils,fonts-dejavu-core
 # Application layer: the sandbox, and LibreOffice Writer as the first operated application. EXTRA_PKGS adds more (e.g. blender).
 PKGS=$PKGS,bubblewrap,libreoffice-writer,libreoffice-gtk3,python3-uno${EXTRA_PKGS:+,$EXTRA_PKGS}
 PKGS=$PKGS,libgl1-mesa-dri,libegl-mesa0,curl,ca-certificates,login,passwd,less,initramfs-tools
@@ -65,11 +66,11 @@ echo "$SOURCES" | mmdebstrap --mode=unshare --arch="$ARCH" --quiet $KEYRINGS --i
 	--customize-hook="copy-in '$DEB' /tmp" --customize-hook="chroot \"\$1\" sh -eu -c '
 		dpkg -i /tmp/$(basename "$DEB") && rm /tmp/$(basename "$DEB")
 		for v in \$(ls /lib/modules); do /usr/libexec/agentos/update-boot \$v; done
-		usermod -aG agentd-users,video,render,input agentos # the account itself is made by the package (postinst)
 		if [ -n \"\$ROOT_PASSWORD_HASH\" ]; then usermod -p \"\$ROOT_PASSWORD_HASH\" root; else passwd -q -l root; fi
-		systemctl -q enable agentd.socket agentd.service agentd-broker.socket agentd-approve.socket agentd-broker-recover.service agentd-apps.socket agentd-apps-approve.socket agentos-kiosk.service agentos-key-import.service \\
-			agentos-bootlog.timer agentos-debug.service NetworkManager.service systemd-timesyncd.service
-		systemctl -q disable getty@tty1.service
+		systemctl -q enable agentd.socket agentd.service agentd-broker.socket agentd-approve.socket agentd-broker-recover.service agentos-key-import.service \\
+			agentos-bootlog.timer agentos-debug.service NetworkManager.service systemd-timesyncd.service gdm.service agentos-people.path agentos-people.service
+		systemctl -q set-default graphical.target
+		dconf update
 		echo agentos >/etc/hostname
 		printf \"127.0.0.1 localhost\\n127.0.1.1 agentos\\n::1 localhost ip6-localhost ip6-loopback\\n\" >/etc/hosts
 		printf \"$ROOT_DEV / ext4 errors=remount-ro 0 1\\n$BOOT_DEV /boot/firmware vfat umask=0077 0 2\\n\" >/etc/fstab

@@ -1,6 +1,7 @@
-// The on-screen agent console (user agentos) may join Wi-Fi networks and save them for the whole system.
+// The agent console of a person at the screen (local, active session, group agentd-users) may join Wi-Fi networks
+// and save them for the whole system.
 polkit.addRule(function (action, subject) {
-    if (subject.user == "agentos" && [
+    if (subject.local && subject.active && subject.isInGroup("agentd-users") && [
         "org.freedesktop.NetworkManager.network-control",
         "org.freedesktop.NetworkManager.settings.modify.system",
         "org.freedesktop.NetworkManager.wifi.scan",
