@@ -26,6 +26,7 @@ use zbus::blocking::{Connection, connection::Builder};
 use zbus::zvariant::{DynamicType, OwnedObjectPath, OwnedValue};
 
 mod apps;
+mod route;
 mod txn;
 use txn::{Journal, end_txn, put, recover, rollback, snapshot, staged_put};
 
@@ -1043,6 +1044,8 @@ fn serve() -> Res<()> {
         return Err(format!("bad AGENTD_MODEL {model:?}").into());
     }
     let key = std::env::var("GEMINI_API_KEY").ok().filter(|k| config_safe(k));
+    let router = route::Router::from_env(model.clone(), key.clone())?;
+    let planner = if key.is_some() || router.local.is_some() { "live" } else { "unavailable" };
     // Socket activation: fd 3 is SOCK, passed by systemd (LISTEN_FDS/LISTEN_PID, sd_listen_fds(3)).
     if std::env::var("LISTEN_FDS").as_deref() != Ok("1") || std::env::var("LISTEN_PID") != Ok(std::process::id().to_string()) {
         return Err("no socket from systemd: start agentd.socket / agentd.service".into());
@@ -1051,7 +1054,7 @@ fn serve() -> Res<()> {
     let (start, mut tasks) = (Instant::now(), 0u64);
     let mut history: Vec<Value> = Vec::new();
     emit(&mut log, "AGENTD_READY", &[("pid", json!(std::process::id())), ("socket", json!(SOCK)), ("model", json!(model)),
-                                     ("planner", json!(if key.is_some() { "live" } else { "unavailable" }))]);
+                                     ("planner", json!(planner)), ("tiers", json!(router.tiers()))]);
     for conn in listener.incoming() {
         let Ok(mut c) = conn else { continue };
         let _ = c.set_read_timeout(Some(Duration::from_secs(5)));
@@ -1061,7 +1064,7 @@ fn serve() -> Res<()> {
         // Local commands never reach the model, so they work offline.
         if intent.starts_with('/') {
             match intent.as_str() {
-                "/status" => emit(&mut c, "AGENTD_STATUS", &[("planner", json!(if key.is_some() { "live" } else { "unavailable" })),
+                "/status" => emit(&mut c, "AGENTD_STATUS", &[("planner", json!(planner)), ("tiers", json!(router.tiers())),
                     ("model", json!(model)), ("uptime_s", json!(start.elapsed().as_secs())), ("tasks", json!(tasks))]),
                 _ => emit(&mut c, "TASK_COMPLETE", &[("status", json!("fail")), ("error", json!(format!("unknown command {intent}")))]),
             }
@@ -1071,15 +1074,33 @@ fn serve() -> Res<()> {
         let (Ok(mut note_log), Ok(mut note_c), Ok(mut client)) = (log.try_clone(), c.try_clone(), c.try_clone()) else { continue };
         let mut note = Tee(&mut note_log, &mut note_c);
         let mut out = Tee(&mut log, &mut c);
-        let r = match &key {
+        let r = match route::fixed(&intent) {
             _ if intent.is_empty() => Err("empty request".into()),
-            None => Err("planner unavailable: no valid GEMINI_API_KEY (set it in /etc/agentd/gemini.env)".into()),
-            Some(k) => {
+            // A known request: no model, no network; a failed step still escalates through the router.
+            Some(plan) => {
+                emit(&mut note, "PLANNER_ROUTE", &[("tier", json!("deterministic"))]);
+                let mut contents = vec![json!({"role": "user", "parts": [{"text": intent}]}), plan["candidates"][0]["content"].clone()];
+                let mut first = Some(Ok(plan));
+                workflow(&mut out, &json!(intent), &json!("deterministic"), "fixed", |reason| {
+                    let r = match reason {
+                        None => first.take()?,
+                        Some(r) => {
+                            contents.push(json!({"role": "user", "parts": [{"text": format!("That step failed: {r}. Reply with directives that replace only the failed step (same task_id and step).")}]}));
+                            router.plan(&apps_context(), &json!(contents), true, &mut note)
+                        }
+                    };
+                    if let Ok(v) = &r {
+                        contents.push(v["candidates"][0]["content"].clone());
+                    }
+                    Some(r)
+                })
+            }
+            None => {
                 let user = json!({"role": "user", "parts": [{"text": intent}]});
                 let mut contents = history.clone();
                 contents.push(user.clone());
                 let extra = apps_context();
-                let mut first = Some(gemini(k, &model, &extra, &json!(contents), &mut note));
+                let mut first = Some(router.plan(&extra, &json!(contents), false, &mut note));
                 if let Some(Ok(v)) = &first && let Some((from, reply)) = chat_reply(v) {
                     // The words go to the person only: the journal is copied to the card's FAT partition.
                     emit(&mut client, "CHAT_REPLY", &[("model", json!(from)), ("text", json!(reply))]);
@@ -1100,7 +1121,7 @@ fn serve() -> Res<()> {
                                 format!("That step failed: {r}. Reply with directives that replace only the failed step (same task_id and step).")
                             };
                             contents.push(json!({"role": "user", "parts": [{"text": ask}]}));
-                            gemini(k, &model, &extra, &json!(contents), &mut note)
+                            router.plan(&extra, &json!(contents), true, &mut note)
                         }
                     };
                     if let Ok(v) = &r {
@@ -1140,6 +1161,11 @@ fn describe(v: &Value) -> Option<String> {
             "asking" => format!("  asking {}...", s("model")),
             "ok" => format!("  {} answered in {:.1} s", s("model"), v["ms"].as_f64().unwrap_or(0.0) / 1000.0),
             _ => format!("  no luck: {}", s("reason")),
+        },
+        "PLANNER_ROUTE" => match s("tier").as_str() {
+            "deterministic" => "  known request: planned without a model".into(),
+            "local" => format!("  answered by the local model ({})", s("model")),
+            _ => format!("  asking Gemini ({})", s("reason").chars().filter(|c| !c.is_control()).collect::<String>()),
         },
         "CLOCK_WAIT" => format!("  This computer's clock is not set yet. Waiting up to {} s for internet time...", v["max_s"]),
         // Model text is untrusted: control characters could drive the terminal.
@@ -1183,8 +1209,8 @@ fn describe(v: &Value) -> Option<String> {
                 format!("Not done: {e}\n{} step(s) had been verified before it stopped.", v["steps"].as_u64().unwrap_or(0))
             }
         }
-        "AGENTD_STATUS" => format!("Agent: running for {} s, {} task(s) handled.\nPlanner: {} (models: {}).",
-                                   v["uptime_s"], v["tasks"], s("planner"), s("model")),
+        "AGENTD_STATUS" => format!("Agent: running for {} s, {} task(s) handled.\nPlanner: {} (tiers: {}; Gemini models: {}).",
+                                   v["uptime_s"], v["tasks"], s("planner"), s("tiers"), s("model")),
         _ => return None,
     })
 }
@@ -1623,6 +1649,7 @@ mod tests {
         assert_eq!(d(json!({"event": "TASK_COMPLETE", "status": "success", "steps": 2, "repairs": 1})), "Done: 2 step(s) verified, after 1 repair(s).");
         assert!(d(json!({"event": "PLANNER_TRY", "status": "failed", "reason": "m: no answer within 25 s"})).contains("no answer"));
         assert!(d(json!({"event": "CLOCK_WAIT", "max_s": 45})).contains("clock"));
+        assert!(d(json!({"event": "PLANNER_ROUTE", "tier": "gemini", "reason": "shell /bin/sh is beyond the local model"})).contains("beyond the local"));
         assert!(d(json!({"event": "TASK_COMPLETE", "status": "fail", "error": "planner unavailable: no key"})).contains("Nothing was changed"));
         assert!(d(json!({"event": "TASK_COMPLETE", "status": "fail", "error": "planner declined: no GUI"})).starts_with("I can't do that"));
         assert!(d(json!({"event": "TASK_COMPLETE", "status": "fail", "steps": 1, "error": "repair budget exhausted"})).contains("1 step(s) had been verified"));

@@ -5,6 +5,9 @@ Handoff file. Any model/engineer resuming: read this, then `docs/RESUME.md` (hos
 (2026-11-14): a general-purpose agent-native OS where the OS understands and operates ordinary applications.
 Keep replies short; update this file after each milestone.
 
+Direction from 2026-11-18: `vision /future_direction.txt` (nine goals, extends the mandate; summary in CLAUDE.md
+"Future direction"). Choose the next milestones from it; existing functionality stays.
+
 ## Assessment (2026-11-14, verified by reading code, not reports)
 - Real and reusable: Debian 13 image build (amd64 + Pi 5 arm64), `agentd` (Rust; planner loop, strict directive
   validation, replan budget, 30 s kill, SIGUSR1 stop), root broker with compiled-in policy + approvals + audit,
@@ -95,8 +98,22 @@ Keep replies short; update this file after each milestone.
       both passed on rerun, neither understood further). Not yet on the Pi.
 - [ ] M5 GUI fallback for apps with no scriptable interface (AT-SPI code from the Alpine cycles)
 - [ ] M6 Pi 5: boot the arm64 image, resource measurements, power-pull test (needs the user's hands)
-- [ ] M7 local planner option (OpenAI-compatible endpoint; Hailo-10H compatibility must be measured, not assumed).
-      Without any model the layer still works: `agentd apps run <cap> name=value` needs no network.
+- [x] M7a model routing (goal 6, 2026-11-18): `agentd/src/route.rs`: deterministic plans for known requests (no model,
+      works offline) -> optional local model on loopback (OpenAI-compatible; limited to chat/read/app/service status+restart,
+      else it escalates) -> Gemini (learn, shell, installs, settings, every repair). Telemetry `PLANNER_ROUTE`; `/status` lists
+      the tiers. Evidence: unit 29 pass (incl. a curl round-trip to a fake local server); `tests/test-debian-vm.sh` 27/27
+      (2026-11-18, `build/debian-vm-run.log`): "What's the time?" ran with no key and no PLANNER_TRY; stand-in local server
+      answered chat; an escalated request with no key failed with nothing run; live Gemini tasks unchanged.
+- [x] M7a+ Ollama-style endpoint (`/api/chat`, single reply or stream) for hailo-ollama.
+- [x] M7b local model on the user's AI HAT+ 2 (Hailo-10H, own 8 GB; the user's choice: models on the HAT, OS on the Pi),
+      2026-11-18, on the real Pi: `scripts/setup-hailo.sh` (driver from the Raspberry Pi archive, hailo-ollama 5.1.1 pinned,
+      loopback only, own user, `qwen2.5-instruct:1.5b`). Measured it cannot write JSON plans and once chose a wrong action, so
+      the local tier became a one-line classifier with deterministic checks (change verbs skip it; its choice must fit the
+      request). Results and limits: `docs/hailo-2026-11-18.md`. Unit 26 pass; `tests/test-debian-vm.sh` 27/27.
+- [x] M7c HAT model comparison (2026-11-18, on the Pi): qwen2:1.5b best (14/22 handled, 0 wrong after the checks, 1.3 s);
+      deepseek-r1 unusable (thinks first); llama3.2:3b over the size limit. Checks added: lenient `READ x.`/`status:`, a service
+      question is never a read. hailo-ollama aborts on a live model switch. `docs/hailo-2026-11-18.md`.
+- [ ] M7d grow `fixed` from real requests; reboot test of `hailo-ollama.service`. (Unused models removed from the Pi 2026-11-18.)
 - [ ] Older open items from `docs/RESUME.md`: health checks (chunk 6), updates/persistence, pinned image builds
 - [x] 2026-11-18: Pi 5 card read back: 34 app operations on hardware (26 committed, 2 conflicts kept the human's file,
       11 failed safely: approvals refused, model mistakes, all recovered or refused before running). `docs/pi5-results-2026-11-18.md`.

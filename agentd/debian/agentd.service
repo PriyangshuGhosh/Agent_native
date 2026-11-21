@@ -10,7 +10,8 @@ StartLimitBurst=5
 
 [Service]
 ExecStart=/usr/bin/agentd serve
-# Holds GEMINI_API_KEY=... (and optionally AGENTD_MODEL=...); without it agentd runs with the planner unavailable.
+# Holds GEMINI_API_KEY=... (and optionally AGENTD_MODEL=...; AGENTD_LOCAL_URL=http://127.0.0.1:<port>/v1 and
+# AGENTD_LOCAL_MODEL=... for a local model). Without any, only known requests are planned (no model needed).
 EnvironmentFile=-/etc/agentd/gemini.env
 Restart=on-failure
 RestartSec=2

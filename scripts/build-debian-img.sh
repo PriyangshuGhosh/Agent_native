@@ -96,6 +96,8 @@ kernel=kernel_2712.img
 initramfs initramfs_2712 followkernel
 dtoverlay=vc4-kms-v3d
 disable_overscan=1
+# AI HAT+ / HAT+ 2: PCIe Gen 3 (the HAT+ EEPROM enables the connector itself)
+dtparam=pciex1_gen=3
 CFG
 	echo "console=tty1 root=$ROOT_DEV rootfstype=ext4 rootwait fsck.repair=yes" >"$B/cmdline.txt" ;;
 esac
