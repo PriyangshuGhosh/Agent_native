@@ -196,5 +196,8 @@ deterministic execution first, then a local model under 3B for simple intents an
 or unfamiliar work, with the same permission and verification rules at every tier; (7) validated workflows become reusable
 capabilities, and unverified AI output never becomes trusted; (8) low resource use (Pi 5 class), and the agent must never slow
 the desktop; (9) desktop, terminal and agent act on one shared state, with every agent action observable, interruptible and reviewable.
+**Production decisions (2026-11-21, the user's):** GNOME desktop (gdm3, gnome-initial-setup, GNOME Software + Flatpak),
+A/B root partitions (read-only root, RAUC; systemd-boot on amd64, `tryboot` on Pi 5), release targets amd64 **and** Pi 5.
+Roadmap P1–P9: `PROJECT_STATE.md` "Production roadmap".
 How to apply: choose and shape new work by these goals, and build on what exists (`world.json` → knowledge layer, capability
 manifests + `learn` → operational knowledge, ops journal → structured exec/history, M7 → local model tier).

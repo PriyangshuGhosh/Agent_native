@@ -50,6 +50,39 @@ Direction from 2026-11-18: `vision /future_direction.txt` (nine goals, extends t
 9. Hash: `sha2` crate (pure Rust; musl-safe so the Alpine gates still build). State is JSON files, not SQLite
    (shortcut: fine to thousands of files; move to SQLite if the workspace is larger).
 
+## Production roadmap (2026-11-21; the user's decisions: GNOME, A/B partitions, amd64 + Pi 5 both)
+Goal: a complete OS (desktop, settings, app menu, navigation) that works without the AI, with agentd built in.
+Package names checked against trixie on 2026-11-21: gnome-core 48, gdm3, gnome-initial-setup, gnome-software-plugin-flatpak,
+rauc 1.13, systemd-boot 257, tinysparql (file index: tracker-miner-fs).
+**Consequence of A/B:** the root becomes a read-only image again (as in cycle 06), so the device never runs apt on its
+own root. Apps the person installs come from **Flatpak** (GNOME Software). Broker `pkg.install` (apt) must move to
+Flatpak or be dropped. LibreOffice and Blender stay in the base image so their live bridges keep working.
+Persistent state goes on its own partition (`/home`, `/var/lib/agentd*`, `/etc` overlay or bind-mounts).
+Order (each item is done only when its check passes in the VM, then on the Pi):
+- [ ] P1 GNOME desktop: gnome-core + gdm3 instead of labwc/waybar/kiosk; agent console as a normal app (.desktop);
+      LibreOffice/Blender launchers keep their control sockets; Xwayland stays. Check: login, app grid, Settings
+      (Wi-Fi, display, sound, keyboard, time zone), lock/unlock, without agentd. Measure idle RAM on the Pi 5 (goal 8).
+      Pi 5: mutter needs GLES on V3D (works on other Pi GNOME distros; verify).
+- [ ] P2 accounts + first boot: gnome-initial-setup (language, keyboard, Wi-Fi, account); Gemini key step; the app runner
+      per user (today fixed to `agentos`, one request at a time; review the /tmp UNO socket trust for multi-user).
+- [ ] P3 devices: PipeWire/WirePlumber, BlueZ, CUPS, power-profiles-daemon, suspend, Orca. Pi: HDMI hotplug, sleep.
+- [ ] P4 A/B system: partitions ESP/boot, rootA, rootB, data. Read-only root (SquashFS or EROFS, reuse cycle 06/07
+      reproducible build). RAUC: amd64 via systemd-boot boot counting, Pi 5 via `tryboot` + autoboot.txt. Signed bundles,
+      pinned package versions. Check: an update cut by power boots the old or the new root, never neither; a bad root
+      that fails health falls back automatically.
+- [ ] P5 software: GNOME Software + Flatpak (Flathub opt-in); system updates shown in GNOME Software via RAUC.
+- [ ] P6 agent in the desktop (goal 9): GNOME Shell extension (panel indicator: current step, Stop = SIGUSR1, history +
+      undo from ops.jsonl); approvals as notifications (still answered on the approval socket, never through agentd);
+      agentd as a GNOME Shell search provider; settings the agent changes go through broker entries that match
+      what GNOME Settings changes (gsettings/NetworkManager/BlueZ), so both see one state.
+- [ ] P7 knowledge + search (goals 2, 5): read the tinysparql/tracker file index instead of a recursive scan; typed
+      system objects from D-Bus/udev events (grow world.json).
+- [ ] P8 install + release: amd64 installer ISO (Calamares or a RAUC-based installer), UEFI test on real hardware
+      (the user's hands), Pi SD/NVMe images, CI running `tests/regress.sh` + VM tests, versioned signed releases.
+- [ ] P9 hardening: nftables default-deny incoming, AppArmor for agentd/broker/runner, optional LUKS on data,
+      Secure Boot (amd64), per-user key storage instead of `/etc/agentd/gemini.env`.
+- Ongoing: chunk 6 health monitor (feeds P4's automatic fallback), Pi power pull, M5 AT-SPI GUI fallback, more packs.
+
 ## Progress
 - [x] Repo + environment assessment
 - [x] M1 `agentd/src/apps.rs` core: catalog (`scan_apps`), manifests (`check_manifest`, `load_caps`, packs with shared
