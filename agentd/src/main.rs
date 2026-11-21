@@ -18,7 +18,7 @@ use std::os::unix::net::{UnixListener, UnixStream};
 use std::os::unix::process::CommandExt;
 use std::path::{Component, Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::sync::atomic::{AtomicBool, AtomicI32, Ordering::SeqCst};
+use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU32, Ordering::SeqCst};
 use std::sync::mpsc;
 use std::thread::sleep;
 use std::time::{Duration, Instant};
@@ -26,6 +26,7 @@ use zbus::blocking::{Connection, connection::Builder};
 use zbus::zvariant::{DynamicType, OwnedObjectPath, OwnedValue};
 
 mod apps;
+mod route;
 mod txn;
 use txn::{Journal, end_txn, put, recover, rollback, snapshot, staged_put};
 
@@ -370,7 +371,7 @@ fn app_call(d: &Directive, outs: &HashMap<u64, Value>, tty: &mut dyn Write) -> R
         };
         args.insert(k.to_string(), json!(v));
     }
-    let sock = std::env::var("AGENTD_APPS_SOCK").unwrap_or_else(|_| APPS_SOCK.into());
+    let sock = apps_sock();
     let v = sock_call(&sock, "the application runner", "apps", &json!({"op": "run", "cap": d.target, "args": args}), d, tty)?;
     Ok(v["output"].to_string())
 }
@@ -379,7 +380,7 @@ fn app_call(d: &Directive, outs: &HashMap<u64, Value>, tty: &mut dyn Write) -> R
 /// fails on a non-zero exit, so the planner sees the output and can correct the command.
 fn shell_call(d: &Directive, outs: &HashMap<u64, Value>, tty: &mut dyn Write) -> Res<String> {
     let cmd = param(d, "stdin", outs)?;
-    let sock = std::env::var("AGENTD_APPS_SOCK").unwrap_or_else(|_| APPS_SOCK.into());
+    let sock = apps_sock();
     let r = sock_call(&sock, "the application runner", "apps", &json!({"op": "shell", "cmd": cmd}), d, tty)?["output"].take();
     let (code, out) = (r["exit"].as_i64().unwrap_or(-1), r["output"].as_str().unwrap_or("").to_string());
     if code != 0 {
@@ -391,7 +392,7 @@ fn shell_call(d: &Directive, outs: &HashMap<u64, Value>, tty: &mut dyn Write) ->
 /// What the application runner knows, as text for the planner: capabilities, the person's files and their state,
 /// and recent changes the person made. Empty if the runner is not there.
 fn apps_context() -> String {
-    let sock = std::env::var("AGENTD_APPS_SOCK").unwrap_or_else(|_| APPS_SOCK.into());
+    let sock = apps_sock();
     (|| -> Res<String> {
         let mut c = UnixStream::connect(&sock)?;
         c.set_read_timeout(Some(Duration::from_secs(20)))?;
@@ -834,8 +835,37 @@ const SOCK: &str = "/run/agentd.sock";
 const BROKER_SOCK: &str = "/run/agentd-broker.sock";
 const APPROVE_SOCK: &str = "/run/agentd-approve.sock";
 /// Longer than the broker can take: 5 s to read, 60 s for a person, 30 s to restart, 5 s for each status check.
-const APPS_SOCK: &str = "/run/agentd-apps.sock";
-const APPS_APPROVE_SOCK: &str = "/run/agentd-apps-approve.sock";
+/// Each person has their own application runner (`agentd-apps@<uid>`), at `<uid>.sock` (agentd) and `<uid>.approve.sock`
+/// (only that person) in this directory.
+const APPS_DIR: &str = "/run/agentd-apps";
+/// Whose runner the current request uses: the uid that sent it (serve handles one request at a time).
+static APPS_UID: AtomicU32 = AtomicU32::new(u32::MAX);
+
+/// The runner socket (`kind`: "sock" or "approve.sock") for `uid`. A person only ever gets their own. Root (`agentd ask`)
+/// acts for the one person who has a runner; with none or several it gets its own path, which does not exist, so app
+/// steps fail with nothing run.
+fn runner_sock(dir: &str, uid: u32, kind: &str) -> String {
+    if uid == 0 {
+        let people: Vec<u32> = fs::read_dir(dir).into_iter().flatten().flatten()
+            .filter_map(|e| e.file_name().to_str()?.strip_suffix(".sock")?.parse().ok()).filter(|&u| u >= 1000).collect();
+        if let [u] = people[..] {
+            return format!("{dir}/{u}.{kind}");
+        }
+    }
+    format!("{dir}/{uid}.{kind}")
+}
+
+fn apps_sock() -> String {
+    std::env::var("AGENTD_APPS_SOCK").unwrap_or_else(|_| runner_sock(APPS_DIR, APPS_UID.load(SeqCst), "sock"))
+}
+
+fn peer_uid(c: &UnixStream) -> u32 {
+    use std::os::fd::AsRawFd;
+    let mut cred = libc::ucred { pid: 0, uid: u32::MAX, gid: 0 };
+    let mut len = size_of::<libc::ucred>() as libc::socklen_t;
+    unsafe { libc::getsockopt(c.as_raw_fd(), libc::SOL_SOCKET, libc::SO_PEERCRED, (&raw mut cred).cast(), &mut len) };
+    cred.uid
+}
 /// An application operation may run for its 600 s cap, plus a 60 s approval.
 const APPS_WAIT: Duration = Duration::from_secs(700);
 const BROKER_WAIT: Duration = Duration::from_secs(110);
@@ -944,7 +974,7 @@ the text files you give as inputs; a manifest whose selftest fails is discarded,
 fn learn_call(d: &Directive, tty: &mut dyn Write) -> Res<String> {
     let key = std::env::var("GEMINI_API_KEY").ok().filter(|k| config_safe(k)).ok_or("planner unavailable: learning needs the model")?;
     let model = std::env::var("AGENTD_MODEL").unwrap_or_else(|_| MODEL_DEFAULT.into());
-    let sock = std::env::var("AGENTD_APPS_SOCK").unwrap_or_else(|_| APPS_SOCK.into());
+    let sock = apps_sock();
     let ev = sock_call(&sock, "the application runner", "apps", &json!({"op": "probe", "app": d.target}), d, tty)?["output"].take();
     let evidence = json!({"binary": ev["binary"], "version": ev["version"], "description": ev["description"], "hints": ev["hints"],
                           "help": ev["help"], "man": ev["man"]});
@@ -1043,6 +1073,8 @@ fn serve() -> Res<()> {
         return Err(format!("bad AGENTD_MODEL {model:?}").into());
     }
     let key = std::env::var("GEMINI_API_KEY").ok().filter(|k| config_safe(k));
+    let router = route::Router::from_env(model.clone(), key.clone())?;
+    let planner = if key.is_some() || router.local.is_some() { "live" } else { "unavailable" };
     // Socket activation: fd 3 is SOCK, passed by systemd (LISTEN_FDS/LISTEN_PID, sd_listen_fds(3)).
     if std::env::var("LISTEN_FDS").as_deref() != Ok("1") || std::env::var("LISTEN_PID") != Ok(std::process::id().to_string()) {
         return Err("no socket from systemd: start agentd.socket / agentd.service".into());
@@ -1051,9 +1083,10 @@ fn serve() -> Res<()> {
     let (start, mut tasks) = (Instant::now(), 0u64);
     let mut history: Vec<Value> = Vec::new();
     emit(&mut log, "AGENTD_READY", &[("pid", json!(std::process::id())), ("socket", json!(SOCK)), ("model", json!(model)),
-                                     ("planner", json!(if key.is_some() { "live" } else { "unavailable" }))]);
+                                     ("planner", json!(planner)), ("tiers", json!(router.tiers()))]);
     for conn in listener.incoming() {
         let Ok(mut c) = conn else { continue };
+        APPS_UID.store(peer_uid(&c), SeqCst);
         let _ = c.set_read_timeout(Some(Duration::from_secs(5)));
         let mut intent = String::new();
         let _ = BufReader::new((&c).take(MAX_REQUEST)).read_line(&mut intent);
@@ -1061,7 +1094,7 @@ fn serve() -> Res<()> {
         // Local commands never reach the model, so they work offline.
         if intent.starts_with('/') {
             match intent.as_str() {
-                "/status" => emit(&mut c, "AGENTD_STATUS", &[("planner", json!(if key.is_some() { "live" } else { "unavailable" })),
+                "/status" => emit(&mut c, "AGENTD_STATUS", &[("planner", json!(planner)), ("tiers", json!(router.tiers())),
                     ("model", json!(model)), ("uptime_s", json!(start.elapsed().as_secs())), ("tasks", json!(tasks))]),
                 _ => emit(&mut c, "TASK_COMPLETE", &[("status", json!("fail")), ("error", json!(format!("unknown command {intent}")))]),
             }
@@ -1071,15 +1104,33 @@ fn serve() -> Res<()> {
         let (Ok(mut note_log), Ok(mut note_c), Ok(mut client)) = (log.try_clone(), c.try_clone(), c.try_clone()) else { continue };
         let mut note = Tee(&mut note_log, &mut note_c);
         let mut out = Tee(&mut log, &mut c);
-        let r = match &key {
+        let r = match route::fixed(&intent) {
             _ if intent.is_empty() => Err("empty request".into()),
-            None => Err("planner unavailable: no valid GEMINI_API_KEY (set it in /etc/agentd/gemini.env)".into()),
-            Some(k) => {
+            // A known request: no model, no network; a failed step still escalates through the router.
+            Some(plan) => {
+                emit(&mut note, "PLANNER_ROUTE", &[("tier", json!("deterministic"))]);
+                let mut contents = vec![json!({"role": "user", "parts": [{"text": intent}]}), plan["candidates"][0]["content"].clone()];
+                let mut first = Some(Ok(plan));
+                workflow(&mut out, &json!(intent), &json!("deterministic"), "fixed", |reason| {
+                    let r = match reason {
+                        None => first.take()?,
+                        Some(r) => {
+                            contents.push(json!({"role": "user", "parts": [{"text": format!("That step failed: {r}. Reply with directives that replace only the failed step (same task_id and step).")}]}));
+                            router.plan(&apps_context(), &json!(contents), true, &mut note)
+                        }
+                    };
+                    if let Ok(v) = &r {
+                        contents.push(v["candidates"][0]["content"].clone());
+                    }
+                    Some(r)
+                })
+            }
+            None => {
                 let user = json!({"role": "user", "parts": [{"text": intent}]});
                 let mut contents = history.clone();
                 contents.push(user.clone());
                 let extra = apps_context();
-                let mut first = Some(gemini(k, &model, &extra, &json!(contents), &mut note));
+                let mut first = Some(router.plan(&extra, &json!(contents), false, &mut note));
                 if let Some(Ok(v)) = &first && let Some((from, reply)) = chat_reply(v) {
                     // The words go to the person only: the journal is copied to the card's FAT partition.
                     emit(&mut client, "CHAT_REPLY", &[("model", json!(from)), ("text", json!(reply))]);
@@ -1100,7 +1151,7 @@ fn serve() -> Res<()> {
                                 format!("That step failed: {r}. Reply with directives that replace only the failed step (same task_id and step).")
                             };
                             contents.push(json!({"role": "user", "parts": [{"text": ask}]}));
-                            gemini(k, &model, &extra, &json!(contents), &mut note)
+                            router.plan(&extra, &json!(contents), true, &mut note)
                         }
                     };
                     if let Ok(v) = &r {
@@ -1140,6 +1191,11 @@ fn describe(v: &Value) -> Option<String> {
             "asking" => format!("  asking {}...", s("model")),
             "ok" => format!("  {} answered in {:.1} s", s("model"), v["ms"].as_f64().unwrap_or(0.0) / 1000.0),
             _ => format!("  no luck: {}", s("reason")),
+        },
+        "PLANNER_ROUTE" => match s("tier").as_str() {
+            "deterministic" => "  known request: planned without a model".into(),
+            "local" => format!("  answered by the local model ({})", s("model")),
+            _ => format!("  asking Gemini ({})", s("reason").chars().filter(|c| !c.is_control()).collect::<String>()),
         },
         "CLOCK_WAIT" => format!("  This computer's clock is not set yet. Waiting up to {} s for internet time...", v["max_s"]),
         // Model text is untrusted: control characters could drive the terminal.
@@ -1183,8 +1239,8 @@ fn describe(v: &Value) -> Option<String> {
                 format!("Not done: {e}\n{} step(s) had been verified before it stopped.", v["steps"].as_u64().unwrap_or(0))
             }
         }
-        "AGENTD_STATUS" => format!("Agent: running for {} s, {} task(s) handled.\nPlanner: {} (models: {}).",
-                                   v["uptime_s"], v["tasks"], s("planner"), s("model")),
+        "AGENTD_STATUS" => format!("Agent: running for {} s, {} task(s) handled.\nPlanner: {} (tiers: {}; Gemini models: {}).",
+                                   v["uptime_s"], v["tasks"], s("planner"), s("tiers"), s("model")),
         _ => return None,
     })
 }
@@ -1298,7 +1354,7 @@ Today it can transform text and read the date, disk space, memory, uptime and sy
 /// Shows the broker's own text and passes the person's answer straight to it; agentd never sees or carries the answer.
 fn approve(v: &Value, input: &mut impl BufRead) -> Res<()> {
     let id = v["id"].as_u64().ok_or("no request id")?;
-    let mut b = UnixStream::connect(if v["via"] == "apps" { APPS_APPROVE_SOCK } else { APPROVE_SOCK })?;
+    let mut b = UnixStream::connect(if v["via"] == "apps" { runner_sock(APPS_DIR, unsafe { libc::getuid() }, "approve.sock") } else { APPROVE_SOCK.into() })?;
     writeln!(b, "{}", json!({"id": id}))?;
     let mut line = String::new();
     BufReader::new(b.try_clone()?).read_line(&mut line)?;
@@ -1617,12 +1673,30 @@ mod tests {
     }
 
     #[test]
+    fn runner_is_the_requesters_own() {
+        let d = std::env::temp_dir().join(format!("agentd-runners-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&d);
+        fs::create_dir_all(&d).unwrap();
+        let dir = d.to_str().unwrap();
+        for f in ["1000.sock", "1000.approve.sock", "120.sock"] {
+            fs::write(d.join(f), "").unwrap();
+        }
+        // A person gets only their own, even if it does not exist; root gets the one person's (system uids ignored).
+        assert_eq!(runner_sock(dir, 1001, "sock"), format!("{dir}/1001.sock"));
+        assert_eq!(runner_sock(dir, 0, "approve.sock"), format!("{dir}/1000.approve.sock"));
+        fs::write(d.join("1001.sock"), "").unwrap();
+        assert_eq!(runner_sock(dir, 0, "sock"), format!("{dir}/0.sock")); // two people: root must ask as one of them
+        fs::remove_dir_all(&d).unwrap();
+    }
+
+    #[test]
     fn console_explains_outcomes_in_plain_words() {
         let d = |v: Value| describe(&v).unwrap_or_default();
         assert_eq!(d(json!({"event": "STEP_VERIFIED", "step": 1, "action": "pipe", "output": "HI"})), "  ok  step 1: pipe -> \"HI\" (verified)");
         assert_eq!(d(json!({"event": "TASK_COMPLETE", "status": "success", "steps": 2, "repairs": 1})), "Done: 2 step(s) verified, after 1 repair(s).");
         assert!(d(json!({"event": "PLANNER_TRY", "status": "failed", "reason": "m: no answer within 25 s"})).contains("no answer"));
         assert!(d(json!({"event": "CLOCK_WAIT", "max_s": 45})).contains("clock"));
+        assert!(d(json!({"event": "PLANNER_ROUTE", "tier": "gemini", "reason": "shell /bin/sh is beyond the local model"})).contains("beyond the local"));
         assert!(d(json!({"event": "TASK_COMPLETE", "status": "fail", "error": "planner unavailable: no key"})).contains("Nothing was changed"));
         assert!(d(json!({"event": "TASK_COMPLETE", "status": "fail", "error": "planner declined: no GUI"})).starts_with("I can't do that"));
         assert!(d(json!({"event": "TASK_COMPLETE", "status": "fail", "steps": 1, "error": "repair budget exhausted"})).contains("1 step(s) had been verified"));

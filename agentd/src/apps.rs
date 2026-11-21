@@ -674,7 +674,8 @@ fn stage_files(m: &Value, opdir: &Path) -> Res<()> {
 fn session_socket(m: &Value) -> Option<PathBuf> {
     use std::os::unix::fs::FileTypeExt;
     let p = PathBuf::from(s(&m["session"], "socket").replace("{uid}", &unsafe { libc::getuid() }.to_string()));
-    p.symlink_metadata().is_ok_and(|x| x.file_type().is_socket()).then_some(p)
+    // Only the person's own: another local user could create this name in /tmp first.
+    p.symlink_metadata().is_ok_and(|x| x.file_type().is_socket() && std::os::unix::fs::MetadataExt::uid(&x) == unsafe { libc::getuid() }).then_some(p)
 }
 
 /// Runs a session helper (`list`, `inspect`) against the running application and parses its JSON.
@@ -748,14 +749,14 @@ pub fn open(ctx: &Ctx, path: &str, wait: bool) -> Res<Value> {
     let mut cmd = std::process::Command::new(&argv[0]);
     // No inherited pipes: a caller reading our output must not wait for the application to exit.
     cmd.args(&argv[1..]).stdin(std::process::Stdio::null()).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null());
-    // The runner is a service without a display of its own: it joins the person's labwc session (logind runtime dir).
+    // The runner is a service without a display of its own: it joins the person's desktop session (logind runtime dir).
     if std::env::var_os("WAYLAND_DISPLAY").is_none() {
         let rt = format!("/run/user/{}", unsafe { libc::getuid() });
         if !Path::new(&rt).join("wayland-0").exists() {
             return Err("no desktop is on the screen".into());
         }
         cmd.env("XDG_RUNTIME_DIR", &rt).env("WAYLAND_DISPLAY", "wayland-0");
-        // Debian's Blender (4.3, arm64) only has the X11 back-end: labwc's Xwayland is display :0.
+        // Debian's Blender (4.3, arm64) only has the X11 back-end: the session's Xwayland is display :0.
         if Path::new("/tmp/.X11-unix/X0").exists() {
             cmd.env("DISPLAY", ":0");
         }
@@ -1289,7 +1290,7 @@ pub fn runner(args: &[String]) -> Res<()> {
     } else {
         let var = |k: &str| std::env::var(k).unwrap_or_default();
         if var("LISTEN_FDS") != "2" || var("LISTEN_PID") != std::process::id().to_string() {
-            return Err("no sockets from systemd: start agentd-apps.socket and agentd-apps-approve.socket".into());
+            return Err("no sockets from systemd: start agentd-apps@<uid>.socket and agentd-apps-approve@<uid>.socket".into());
         }
         let names = var("LISTEN_FDNAMES");
         let fd = |n: &str| names.split(':').position(|x| x == n).map(|i| 3 + i as i32).ok_or(format!("no socket named {n}"));

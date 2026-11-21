@@ -1,0 +1,11 @@
+# That person's answers to their runner's approval questions: only they can connect, so agentd (and other people) cannot approve.
+[Unit]
+Description=CUA-AgentOS application approvals for uid %i (that person only)
+PartOf=user-runtime-dir@%i.service
+
+[Socket]
+ListenStream=/run/agentd-apps/%i.approve.sock
+SocketUser=%i
+SocketMode=0600
+Service=agentd-apps@%i.service
+FileDescriptorName=approve

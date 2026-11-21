@@ -1,0 +1,83 @@
+Agent_native — Additional Architectural Goals
+These goals extend the existing Agent_native vision. They do not replace or remove existing functionality, including the agent daemon, application integrations, sandboxing, verification, transaction management and recovery.
+1. Human-Compatible Desktop Experience
+- Provide a complete, familiar desktop experience comparable to modern operating systems.
+- Support a desktop, application launcher, dock/taskbar, universal search, widgets and notifications.
+- Provide intuitive file management, system settings, software management and device configuration.
+- Support conventional keyboard, mouse and terminal interactions.
+- Ensure users can perform ordinary computing tasks without depending on the AI agent.
+- Maintain a consistent experience for ordinary users, power users and AI-first users.
+2. Unified System Knowledge Layer
+- Maintain a structured, machine-readable representation of the operating system.
+- Represent applications, files, processes, services, devices, settings, permissions and system states as discoverable system objects.
+- Provide a unified representation accessible to both the desktop environment and the AI agent.
+- Expose relevant system information without requiring repeated command execution or unrestricted system inspection.
+- Maintain relationships and dependencies between system objects.
+- Support event-driven state updates rather than relying exclusively on repeated polling.
+3. Persistent Operational Knowledge
+- Maintain persistent knowledge of application capabilities, supported operations and operational workflows.
+- Remember previously discovered application interfaces, APIs, commands, plugins and limitations.
+- Preserve validated workflows for reuse across subsequent sessions.
+- Maintain execution history, success/failure evidence, preconditions and verification criteria.
+- Associate operational knowledge with application versions and environmental dependencies.
+- Distinguish between discovered capabilities, validated workflows and user-authorized operations.
+- Invalidate or revalidate outdated knowledge when applications, configurations or dependencies change.
+- Prevent successful execution from automatically granting permanent permissions.
+4. Agent-Aware Terminal
+- Preserve conventional terminal appearance and compatibility with established Linux shell workflows.
+- Provide a structured execution interface alongside traditional command execution.
+- Expose machine-readable command arguments, outputs, errors and execution states.
+- Support structured permission checks and risk classification.
+- Maintain execution history and operation identifiers.
+- Provide execution previews and recoverability for supported operations.
+- Reduce dependence on parsing arbitrary terminal text and interpreting undocumented command behaviour.
+5. Intelligent Filesystem and Information Discovery
+- Preserve conventional filesystem semantics and application compatibility.
+- Introduce a multi-structure filesystem intelligence layer.
+- Maintain hierarchical, metadata, content, temporal and relationship-based indexes.
+- Represent relationships between files, applications, projects and other system objects.
+- Support semantic and contextual information discovery.
+- Enable permission-aware retrieval and efficient incremental indexing.
+- Maintain consistency between the physical filesystem and its intelligence indexes.
+- Support efficient information retrieval without requiring the agent to recursively inspect the entire filesystem.
+6. Hierarchical Intelligence and Model Routing
+- Avoid unnecessary invocation of large language models.
+- Prioritize deterministic execution for known, well-defined operations.
+- Use local models with fewer than 3 billion parameters for:
+  - Basic conversational interactions.
+  - Natural-language intent interpretation.
+  - Simple application and system operations.
+  - System status explanations.
+  - Basic administration and troubleshooting.
+  - Initial system diagnostics and information gathering.
+- Escalate complex reasoning, unfamiliar application operations and extensive information gathering to more capable models when necessary.
+- Support optional external intelligence for tasks requiring advanced reasoning or current external information.
+- Maintain consistent permission and verification policies across all intelligence tiers.
+- Make model selection dependent on task complexity, uncertainty, risk and available resources.
+7. Operational Learning and Reusability
+- Convert successfully discovered and validated workflows into reusable operational knowledge.
+- Reduce repeated discovery, planning and reasoning for previously solved tasks.
+- Maintain evidence of workflow reliability and reproducibility.
+- Distinguish reusable operational knowledge from conversational memory.
+- Support capability updates, versioning, invalidation and revalidation.
+- Prevent unverified AI-generated workflows from becoming trusted system capabilities.
+8. Resource-Efficient Agent Infrastructure
+- Minimize background agent resource consumption.
+- Avoid continuous large-model inference for routine system operations.
+- Prefer deterministic, event-driven and lightweight local processing.
+- Optimize memory consumption, model loading, inference latency and CPU utilization.
+- Support operation on resource-constrained hardware.
+- Ensure that agent intelligence does not compromise ordinary desktop responsiveness.
+9. Unified Human-Agent Interaction
+- Ensure desktop, terminal and agent interfaces operate on the same underlying system state.
+- Allow users to initiate operations through graphical interfaces, terminal commands or natural language.
+- Make agent actions observable and understandable to users.
+- Preserve human control over permissions, sensitive operations and irreversible changes.
+- Ensure that users can inspect, interrupt and review agent operations.
+- Make the agent an additional operating-system interaction mechanism rather than a replacement for conventional interfaces.
+
+Overall architectural objective
+
+Agent_native should provide the familiarity and usability of a conventional desktop operating system while introducing an underlying intelligence infrastructure that makes system state, application capabilities, operational knowledge and execution interfaces natively understandable to AI agents.
+
+The operating system should progressively reduce the amount of reasoning, discovery and computational resources required to perform recurring tasks, without compromising compatibility, security, reliability or human control.

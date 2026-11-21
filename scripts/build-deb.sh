@@ -24,11 +24,12 @@ install -D -m 755 "$B/target/$T/release/agentd-broker" "$P/usr/libexec/agentd-br
 install -m 644 "$ROOT/agentd/debian/agentd.service" "$ROOT/agentd/debian/agentd-console.service" \
 	"$ROOT/agentd/debian/agentd.socket" "$ROOT/agentd/debian/agentd-broker.service" \
 	"$ROOT/agentd/debian/agentd-broker.socket" "$ROOT/agentd/debian/agentd-approve.socket" \
-	"$ROOT/agentd/debian/agentd-broker-recover.service" "$ROOT/agentd/debian/agentd-apps.service" \
-	"$ROOT/agentd/debian/agentd-apps.socket" "$ROOT/agentd/debian/agentd-apps-approve.socket" "$ROOT/agentd/debian/agentd-pkg@.service" "$P/usr/lib/systemd/system/"
+	"$ROOT/agentd/debian/agentd-broker-recover.service" "$ROOT/agentd/debian/agentd-apps@.service" \
+	"$ROOT/agentd/debian/agentd-apps@.socket" "$ROOT/agentd/debian/agentd-apps-approve@.socket" "$ROOT/agentd/debian/agentd-pkg@.service" "$P/usr/lib/systemd/system/"
+install -D -m 644 "$ROOT/agentd/debian/user-runtime-dir@agentd-apps.conf" "$P/usr/lib/systemd/system/user-runtime-dir@.service.d/agentd-apps.conf"
 install -d "$P/usr/share/agentd/caps" && install -m 644 "$ROOT"/agentd/caps/* "$P/usr/share/agentd/caps/"
 install -m 755 "$ROOT/agentd/debian/postinst" "$ROOT/agentd/debian/prerm" "$ROOT/agentd/debian/postrm" "$P/DEBIAN/"
-chmod 700 "$P/etc/agentd" # gemini.env goes here; the key never ships in the package
+chmod 755 "$P/etc/agentd" # gemini.env (0600 root) goes here; 755 so a person's key-setup can see whether a key exists. The key never ships in the package
 cat >"$P/DEBIAN/control" <<CTL
 Package: agentd
 Version: $VERSION

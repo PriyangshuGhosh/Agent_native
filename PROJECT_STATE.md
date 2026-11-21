@@ -5,6 +5,9 @@ Handoff file. Any model/engineer resuming: read this, then `docs/RESUME.md` (hos
 (2026-11-14): a general-purpose agent-native OS where the OS understands and operates ordinary applications.
 Keep replies short; update this file after each milestone.
 
+Direction from 2026-11-18: `vision /future_direction.txt` (nine goals, extends the mandate; summary in CLAUDE.md
+"Future direction"). Choose the next milestones from it; existing functionality stays.
+
 ## Assessment (2026-11-14, verified by reading code, not reports)
 - Real and reusable: Debian 13 image build (amd64 + Pi 5 arm64), `agentd` (Rust; planner loop, strict directive
   validation, replan budget, 30 s kill, SIGUSR1 stop), root broker with compiled-in policy + approvals + audit,
@@ -46,6 +49,49 @@ Keep replies short; update this file after each milestone.
    Needs a real desktop compositor in the image (labwc), not the cage kiosk.
 9. Hash: `sha2` crate (pure Rust; musl-safe so the Alpine gates still build). State is JSON files, not SQLite
    (shortcut: fine to thousands of files; move to SQLite if the workspace is larger).
+
+## Production roadmap (2026-11-21; the user's decisions: GNOME, A/B partitions, amd64 + Pi 5 both)
+Goal: a complete OS (desktop, settings, app menu, navigation) that works without the AI, with agentd built in.
+Package names checked against trixie on 2026-11-21: gnome-core 48, gdm3, gnome-initial-setup, gnome-software-plugin-flatpak,
+rauc 1.13, systemd-boot 257, tinysparql (file index: tracker-miner-fs).
+**Consequence of A/B:** the root becomes a read-only image again (as in cycle 06), so the device never runs apt on its
+own root. Apps the person installs come from **Flatpak** (GNOME Software). Broker `pkg.install` (apt) must move to
+Flatpak or be dropped. LibreOffice and Blender stay in the base image so their live bridges keep working.
+Persistent state goes on its own partition (`/home`, `/var/lib/agentd*`, `/etc` overlay or bind-mounts).
+Order (each item is done only when its check passes in the VM, then on the Pi):
+- [ ] P1 GNOME desktop: gnome-core + gdm3 instead of labwc/waybar/kiosk; agent console as a normal app (.desktop);
+      LibreOffice/Blender launchers keep their control sockets; Xwayland stays. Check: login, app grid, Settings
+      (Wi-Fi, display, sound, keyboard, time zone), lock/unlock, without agentd. Measure idle RAM on the Pi 5 (goal 8).
+      Pi 5: mutter needs GLES on V3D (works on other Pi GNOME distros; verify).
+- [ ] P2 accounts + first boot: gnome-initial-setup (language, keyboard, Wi-Fi, account); Gemini key step; the app runner
+      per user (today fixed to `agentos`, one request at a time; review the /tmp UNO socket trust for multi-user).
+- [ ] P3 devices: PipeWire/WirePlumber, BlueZ, CUPS, power-profiles-daemon, suspend, Orca. Pi: HDMI hotplug, sleep.
+- [ ] P4 A/B system: partitions ESP/boot, rootA, rootB, data. Read-only root (SquashFS or EROFS, reuse cycle 06/07
+      reproducible build). RAUC: amd64 via systemd-boot boot counting, Pi 5 via `tryboot` + autoboot.txt. Signed bundles,
+      pinned package versions. Check: an update cut by power boots the old or the new root, never neither; a bad root
+      that fails health falls back automatically.
+- [ ] P5 software: GNOME Software + Flatpak (Flathub opt-in); system updates shown in GNOME Software via RAUC.
+- [ ] P6 agent in the desktop (goal 9): GNOME Shell extension (panel indicator: current step, Stop = SIGUSR1, history +
+      undo from ops.jsonl); approvals as notifications (still answered on the approval socket, never through agentd);
+      agentd as a GNOME Shell search provider; settings the agent changes go through broker entries that match
+      what GNOME Settings changes (gsettings/NetworkManager/BlueZ), so both see one state.
+- [ ] P7 knowledge + search (goals 2, 5): read the tinysparql/tracker file index instead of a recursive scan; typed
+      system objects from D-Bus/udev events (grow world.json).
+- [ ] P8 install + release: amd64 installer ISO (Calamares or a RAUC-based installer), UEFI test on real hardware
+      (the user's hands), Pi SD/NVMe images, CI running `tests/regress.sh` + VM tests, versioned signed releases.
+- [ ] P9 hardening: nftables default-deny incoming, AppArmor for agentd/broker/runner, optional LUKS on data,
+      Secure Boot (amd64), per-user key storage instead of `/etc/agentd/gemini.env`.
+- P1 + first part of P2, VM evidence (2026-11-21): `tests/test-debian-img.sh` 39/39 on amd64 (`build/debian-img-run.log`):
+      gdm, gnome-initial-setup (no account in the image), per-person runner `agentd-apps@<uid>` started at login,
+      key step only without a key, Settings/lock/Files with the agent stopped, live tasks, Wi-Fi from the person's session.
+      Pi 5 (2026-11-22, `build/debug/pi.log` from line 51540): GNOME Shell (mutter 48.7) on V3D hardware (gbm, no
+      llvmpipe); gnome-initial-setup made the account (sudo + agentd-users), key imported, AGENTD_READY planner live,
+      runner socket at login. Idle after login: 753 MB used of 8 GB (gnome-shell 225 MB RSS). Open: no locales besides
+      C.utf8 (language choice fails, no /etc/default/locale); no rtkit; runner socket also starts for the
+      gnome-initial-setup system user (uid 104).
+- **Next session: read `docs/next-2026-11-23.md`** (Pi 5 complaints: slow, camera, no local model, agent does not ask+install; small fixes).
+- Outside critique (2026-11-21), triaged against this roadmap: `docs/critique-2026-11-21.md`.
+- Ongoing: chunk 6 health monitor (feeds P4's automatic fallback), Pi power pull, M5 AT-SPI GUI fallback, more packs.
 
 ## Progress
 - [x] Repo + environment assessment
@@ -95,8 +141,22 @@ Keep replies short; update this file after each milestone.
       both passed on rerun, neither understood further). Not yet on the Pi.
 - [ ] M5 GUI fallback for apps with no scriptable interface (AT-SPI code from the Alpine cycles)
 - [ ] M6 Pi 5: boot the arm64 image, resource measurements, power-pull test (needs the user's hands)
-- [ ] M7 local planner option (OpenAI-compatible endpoint; Hailo-10H compatibility must be measured, not assumed).
-      Without any model the layer still works: `agentd apps run <cap> name=value` needs no network.
+- [x] M7a model routing (goal 6, 2026-11-18): `agentd/src/route.rs`: deterministic plans for known requests (no model,
+      works offline) -> optional local model on loopback (OpenAI-compatible; limited to chat/read/app/service status+restart,
+      else it escalates) -> Gemini (learn, shell, installs, settings, every repair). Telemetry `PLANNER_ROUTE`; `/status` lists
+      the tiers. Evidence: unit 29 pass (incl. a curl round-trip to a fake local server); `tests/test-debian-vm.sh` 27/27
+      (2026-11-18, `build/debian-vm-run.log`): "What's the time?" ran with no key and no PLANNER_TRY; stand-in local server
+      answered chat; an escalated request with no key failed with nothing run; live Gemini tasks unchanged.
+- [x] M7a+ Ollama-style endpoint (`/api/chat`, single reply or stream) for hailo-ollama.
+- [x] M7b local model on the user's AI HAT+ 2 (Hailo-10H, own 8 GB; the user's choice: models on the HAT, OS on the Pi),
+      2026-11-18, on the real Pi: `scripts/setup-hailo.sh` (driver from the Raspberry Pi archive, hailo-ollama 5.1.1 pinned,
+      loopback only, own user, `qwen2.5-instruct:1.5b`). Measured it cannot write JSON plans and once chose a wrong action, so
+      the local tier became a one-line classifier with deterministic checks (change verbs skip it; its choice must fit the
+      request). Results and limits: `docs/hailo-2026-11-18.md`. Unit 26 pass; `tests/test-debian-vm.sh` 27/27.
+- [x] M7c HAT model comparison (2026-11-18, on the Pi): qwen2:1.5b best (14/22 handled, 0 wrong after the checks, 1.3 s);
+      deepseek-r1 unusable (thinks first); llama3.2:3b over the size limit. Checks added: lenient `READ x.`/`status:`, a service
+      question is never a read. hailo-ollama aborts on a live model switch. `docs/hailo-2026-11-18.md`.
+- [ ] M7d grow `fixed` from real requests; reboot test of `hailo-ollama.service`. (Unused models removed from the Pi 2026-11-18.)
 - [ ] Older open items from `docs/RESUME.md`: health checks (chunk 6), updates/persistence, pinned image builds
 - [x] 2026-11-18: Pi 5 card read back: 34 app operations on hardware (26 committed, 2 conflicts kept the human's file,
       11 failed safely: approvals refused, model mistakes, all recovered or refused before running). `docs/pi5-results-2026-11-18.md`.

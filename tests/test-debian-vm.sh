@@ -18,7 +18,7 @@ umask 077
 
 cp "$DEB" "$S/agentd.deb"
 EXPECT="installed_active ready_without_key no_key_fails_cleanly unprivileged socket_group_only console_on_tty1
-	console_offline crash_restarted broker_sandboxed broker_identities broker_status broker_rejects broker_restart_verified
+	fixed_without_model local_tier_chat local_tier_escalates console_offline crash_restarted broker_sandboxed broker_identities broker_status broker_rejects broker_restart_verified
 	broker_approval_allowed broker_approval_refused broker_approval_timeout broker_hangup_cancels broker_rate_limit broker_audit"
 if [ -r "$KEY_FILE" ]; then
 	printf 'GEMINI_API_KEY=%s\n' "$(tr -d ' \r\n' <"$KEY_FILE")" >"$S/gemini.env"
@@ -48,6 +48,36 @@ journal | grep AGENTD_READY | grep -q '"planner":"unavailable"'; check ready_wit
 out=$(agentd ask "upper-case the word hello"); rc=$?
 echo "$out"
 [ $rc = 1 ] && echo "$out" | grep TASK_COMPLETE | grep -q 'planner unavailable' && active; check no_key_fails_cleanly $?
+# Model routing (goal 6): a known request is planned with no model at all, so it works with no key and no network.
+out=$(agentd ask "What's the time?"); rc=$?
+echo "$out"
+[ $rc = 0 ] && echo "$out" | grep -q '"tier":"deterministic"' && ! echo "$out" | grep -q PLANNER_TRY && echo "$out" | grep -q WORKFLOW_COMPLETE
+check fixed_without_model $?
+# Local tier: a stand-in OpenAI-compatible server on loopback (as llama-server would be) chats for "hello local" and
+# hands everything else up; with no Gemini key, the handed-up request must fail without anything run.
+cat >/run/fake-llm.py <<'PY'
+import http.server, json
+class H(http.server.BaseHTTPRequestHandler):
+    def do_POST(self):
+        req = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+        said = req["messages"][-1]["content"]
+        ans = "CHAT: hi from local" if "Request: hello local" in said else "ESCALATE"
+        body = json.dumps({"choices": [{"message": {"content": ans}}]}).encode()
+        self.send_response(200); self.send_header("Content-Length", str(len(body))); self.end_headers(); self.wfile.write(body)
+http.server.HTTPServer(("127.0.0.1", 8099), H).serve_forever()
+PY
+python3 /run/fake-llm.py & llm=$!
+mkdir -p /run/systemd/system/agentd.service.d
+printf '[Service]\nEnvironment=AGENTD_LOCAL_URL=http://127.0.0.1:8099/v1 AGENTD_LOCAL_MODEL=fake\n' >/run/systemd/system/agentd.service.d/local.conf
+systemctl daemon-reload; systemctl restart agentd; sleep 1
+out=$(agentd ask "hello local"); rc=$?
+echo "$out"
+[ $rc = 0 ] && echo "$out" | grep CHAT_REPLY | grep -q '"model":"local:fake"' && echo "$out" | grep -q '"tier":"local"'; check local_tier_chat $?
+out=$(agentd ask "upper-case the word hello"); rc=$?
+echo "$out"
+[ $rc = 1 ] && echo "$out" | grep -q 'more capable model' && ! echo "$out" | grep -q TASK_START; check local_tier_escalates $?
+kill $llm; rm -r /run/systemd/system/agentd.service.d; systemctl daemon-reload; systemctl restart agentd; sleep 1
+systemctl reset-failed agentd  # the restarts above must not use up the crash-loop start limit checked below
 
 pid=$(systemctl show -p MainPID --value agentd)
 [ "$pid" -gt 0 ] && [ "$(ps -o user= -p "$pid")" != root ]; check unprivileged $?

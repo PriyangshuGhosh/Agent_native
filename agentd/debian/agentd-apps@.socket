@@ -1,0 +1,11 @@
+# Requests from agentd to one person's application runner (instance = uid). Only agentd is in this group.
+[Unit]
+Description=CUA-AgentOS application runner requests for uid %i (agentd only)
+PartOf=user-runtime-dir@%i.service
+
+[Socket]
+ListenStream=/run/agentd-apps/%i.sock
+SocketMode=0660
+SocketGroup=agentd-apps
+Service=agentd-apps@%i.service
+FileDescriptorName=agent

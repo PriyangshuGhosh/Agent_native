@@ -44,6 +44,7 @@ Cycle 06 storage/lifecycle markers (added at the user's request): `STORAGE_READY
 `LIFECYCLE_VERIFIED`, `LIFECYCLE_FAIL_INJECTED`, `ROLLBACK_TRIGGERED`, `ROLLBACK_VERIFIED`. They are emitted
 alongside the canonical `CAPABILITY_INSTALLED` / `CAPABILITY_ROLLBACK`, and gate 06 asserts both sets.
 Debian broker markers (added at the user's request, 2026-11-08): `BROKER_AUDIT` (with `phase`), `APPROVAL_REQUIRED`.
+Model routing marker (goal 6, 2026-11-18): `PLANNER_ROUTE` (with `tier`: `deterministic` | `local` | `gemini`, and `reason` when escalated).
 
 ## The 8 cycles (canonical; `overview/phases.html` is informational only)
 | # | Cycle | Gate script (must exit 0) | Gate condition |
@@ -169,6 +170,34 @@ budgets do not apply. amd64 is tested only in a throwaway KVM guest (`-snapshot`
   (LibreOffice UNO pipe, Blender bridge socket) is changed in the open window instead. State: `<home>/.agentd/`.
   Tests: `tests/test-apps-host.sh` (host, real LibreOffice), `tests/test-apps-vm.sh` (Debian VM; `BLENDER=1` adds Blender).
   The user requires live, on-screen control of open applications (2026-11-14), not only file-level work.
+- **Model routing (goal 6, 2026-11-18):** `agentd/src/route.rs`. Order: `fixed` (known requests such as "disk space",
+  "restart cron" become a plan with no model; whole-request match only) → optional local model (`AGENTD_LOCAL_URL`, loopback
+  http only; ending in `/v1` = OpenAI style, else Ollama `/api/chat`, + `AGENTD_LOCAL_MODEL`) that only **classifies** into
+  one line (`CHAT:` / `READ <x>` / `SERVICE status <unit>` / `ESCALATE`) from which agentd builds the plan; a request with a
+  change verb never reaches it, and its choice must name something the request mentions → Gemini for everything else and
+  every repair. Without a key, a request beyond the local tier fails with nothing run. Same parse/check/verify/approval path
+  for all tiers. The user's Pi 5 has an AI HAT+ 2 (Hailo-10H, own 8 GB): `scripts/setup-hailo.sh` (run on the Pi; not in the
+  image) installs the driver, hailo-ollama (loopback, own user) and `qwen2:1.5b` (best of the 5 HAT models: 14/22, 0 wrong, 1.3 s). Measured: `docs/hailo-2026-11-18.md`
+  (1.4-2.5 s locally, about +2 s when it hands up; a 1.5B model cannot write our JSON plans). Tests: `cargo test route`,
+  `tests/test-debian-vm.sh` (`fixed_without_model`, `local_tier_*`, with a stand-in server).
 - **Debug link (opt-in, never in the image):** `scripts/debug-server.py card <FAT path>` puts `agentos-debug.env` on a card;
   `serve` on the laptop then receives the journal in `build/debug/pi.log`, and `send '<cmd>'` runs a command on the Pi as root.
   TLS is pinned to the server's key (works with a wrong clock) plus a token. Delete the file from the card to turn it off.
+
+## Future direction (2026-11-18, the user's standing direction)
+Source: `vision /future_direction.txt` (the folder name ends in a space). It **extends** everything above and replaces nothing:
+agentd, the broker, app integrations, sandboxing, verification, transactions, recovery and the gates all stay.
+The nine goals: (1) a full conventional desktop that works without the AI; (2) a unified system knowledge layer
+(apps/files/processes/services/devices/settings as typed objects with relations, updated by events, not polling); (3) persistent
+operational knowledge, tied to app versions and revalidated on change, where success never grants permission; (4) an agent-aware
+terminal that is still a normal shell, plus a structured exec interface (args, outputs, risk, op ids, preview, undo);
+(5) filesystem intelligence indexes (metadata, content, time, relations; incremental and permission-aware); (6) model routing:
+deterministic execution first, then a local model under 3B for simple intents and diagnostics, escalating to Gemini for hard
+or unfamiliar work, with the same permission and verification rules at every tier; (7) validated workflows become reusable
+capabilities, and unverified AI output never becomes trusted; (8) low resource use (Pi 5 class), and the agent must never slow
+the desktop; (9) desktop, terminal and agent act on one shared state, with every agent action observable, interruptible and reviewable.
+**Production decisions (2026-11-21, the user's):** GNOME desktop (gdm3, gnome-initial-setup, GNOME Software + Flatpak),
+A/B root partitions (read-only root, RAUC; systemd-boot on amd64, `tryboot` on Pi 5), release targets amd64 **and** Pi 5.
+Roadmap P1–P9: `PROJECT_STATE.md` "Production roadmap".
+How to apply: choose and shape new work by these goals, and build on what exists (`world.json` → knowledge layer, capability
+manifests + `learn` → operational knowledge, ops journal → structured exec/history, M7 → local model tier).

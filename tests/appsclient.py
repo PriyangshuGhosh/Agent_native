@@ -1,7 +1,10 @@
 #!/usr/bin/env python3
 """Test helper. `appsclient.py '<json>'` plays agentd: sends one request to the application runner and prints its final
-answer. `appsclient.py --approver` plays the person at the console: answers yes to every approval the runner asks for."""
-import json, socket, sys, time
+answer. `appsclient.py --approver` plays the person at the console: answers yes to every approval the runner asks for.
+The runner is the person's whose uid is in $APPS_UID (/run/agentd-apps/<uid>.sock and <uid>.approve.sock)."""
+import json, os, socket, sys, time
+
+RUNNER = "/run/agentd-apps/" + os.environ["APPS_UID"]
 
 def approver():
     last = 0
@@ -10,7 +13,7 @@ def approver():
             try:
                 a = socket.socket(socket.AF_UNIX)
                 a.settimeout(5)
-                a.connect("/run/agentd-apps-approve.sock")
+                a.connect(RUNNER + ".approve.sock")
                 a.sendall((json.dumps({"id": i}) + "\n").encode())
                 line = a.makefile().readline()
                 if line:
@@ -26,7 +29,7 @@ if sys.argv[1] == "--approver":
     approver()
 s = socket.socket(socket.AF_UNIX)
 s.settimeout(900)
-s.connect("/run/agentd-apps.sock")
+s.connect(RUNNER + ".sock")
 s.sendall(sys.argv[1].encode() + b"\n")
 for line in s.makefile():
     if json.loads(line).get("status") != "approval_required":

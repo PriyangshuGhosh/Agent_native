@@ -1,0 +1,6 @@
+[Desktop Entry]
+Type=Application
+Name=Agent Key
+Exec=/usr/libexec/agentos/key-setup
+NoDisplay=true
+X-GNOME-Autostart-Phase=Application

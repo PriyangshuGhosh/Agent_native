@@ -3,7 +3,9 @@ set -e
 # Also runs on upgrades, where the services must stay as they are: postinst restarts them.
 [ "$1" = remove ] || exit 0
 if [ -d /run/systemd/system ]; then
-	systemctl disable --now agentd-console.service agentd.service agentd.socket agentd-broker.service agentd-broker.socket agentd-approve.socket agentd-broker-recover.service agentd-apps.service agentd-apps.socket agentd-apps-approve.socket || true
+	systemctl disable --now agentd-console.service agentd.service agentd.socket agentd-broker.service agentd-broker.socket agentd-approve.socket agentd-broker-recover.service || true
+	# Templates cannot be disabled by pattern; stopping is enough (their drop-in goes with the package).
+	systemctl stop 'agentd-apps@*' 'agentd-apps-approve@*' || true
 	# Give tty1 back to the login prompt.
 	systemctl enable --now getty@tty1.service || true
 fi

@@ -1,5 +1,5 @@
 #!/bin/sh
-# Debian base, step 3: boots build/debian-img/cua-agentos-amd64.img (scripts/build-debian-img.sh) in a throwaway KVM
+# Debian base, step 3 (P1 GNOME, P2 first boot): boots build/debian-img/cua-agentos-amd64.img (scripts/build-debian-img.sh) in a throwaway KVM
 # guest: UEFI (OVMF) -> systemd-boot -> Debian, from a sparse copy that is deleted on exit (plus -snapshot), user-mode
 # NAT, a virtio GPU as the screen, USB keyboard and tablet. The key file (GEMINI_KEY_FILE, default ./GEMINI_API_KEY.env)
 # goes onto the copy's FAT partition exactly as a user would put it on the card. A request is typed on the screen
@@ -17,8 +17,11 @@ umask 077
 
 cp --sparse=always "$IMG" "$S/disk.img"
 cp /usr/share/OVMF/OVMF_VARS_4M.fd "$S/vars.fd"
-EXPECT="systemd_pid1 root_locked agentd_active broker_ready_at_boot kiosk_on_screen input_devices desktop_panel file_manager_opens doc_click_via_agentd agent_work_on_screen typed_on_screen wifi_wrong_password
-	wifi_joined wifi_saved_root_only bootlog_on_fat timesync_on_network_up debug_wrong_pin debug_wrong_token debug_command debug_journal"
+EXPECT="systemd_pid1 root_locked agentd_active broker_ready_at_boot gdm_on_screen no_account_in_image initial_setup_on_screen
+	person_joins_agentd_users gnome_session runner_at_login runner_approvals_person_only key_step agent_in_dock agent_app_opens
+	settings_panels_without_agent lock_unlock_without_agent file_manager_without_agent doc_click_via_agentd agent_work_on_screen
+	typed_on_screen wifi_wrong_password wifi_joined wifi_saved_root_only bootlog_on_fat timesync_on_network_up
+	debug_wrong_pin debug_wrong_token debug_command debug_journal"
 ESP="$S/disk.img@@1M"
 export MTOOLS_SKIP_CHECK=1
 if [ -r "$KEY_FILE" ]; then
@@ -33,19 +36,18 @@ mkdir "$S/fat"
 mcopy -i "$ESP" "$S/fat/agentos-debug.env" ::/agentos-debug.env
 "$ROOT/scripts/debug-server.py" serve --bind 127.0.0.1 >/dev/null & SRV=$!
 trap 'kill $SRV 2>/dev/null; rm -rf "$S"' EXIT INT TERM
-mtype -i "$ESP" ::/loader/entries/agentos.conf | sed '/^options/s|$| systemd.run=/boot/firmware/guest.sh|' >"$S/entry.conf"
+mtype -i "$ESP" ::/loader/entries/agentos.conf | sed '/^options/s|$| systemd.run=/boot/firmware/guest.sh systemd.unit=kernel-command-line.target|' >"$S/entry.conf"
 mcopy -o -i "$ESP" "$S/entry.conf" ::/loader/entries/agentos.conf
 
 cat >"$S/guest.sh" <<'GUEST'
 #!/bin/sh
 # Runs as root in the guest (systemd.run=); results go to the second serial port.
 exec >/dev/ttyS1 2>&1
-systemctl start multi-user.target # systemd.run= boots into its own unit only
+systemctl start graphical.target # systemd.run= boots into its own unit only
 failed=0
 check() { if [ "$2" = 0 ]; then echo "CHECK $1 ok"; else echo "CHECK $1 fail"; failed=1; fi; }
 upto() { n=$1; shift; for _ in $(seq "$n"); do "$@" && return 0; sleep 1; done; return 1; }
 journal() { journalctl -b -u agentd -o cat --no-pager; }
-console_up() { pgrep -u agentos -f '^/usr/bin/agentd console' >/dev/null; }
 
 [ "$(cat /proc/1/comm)" = systemd ]; check systemd_pid1 $?
 [ "$(passwd -S root | cut -d' ' -f2)" = L ]; check root_locked $?
@@ -56,32 +58,68 @@ upto 30 systemctl is-active -q agentd; check agentd_active $?
 	systemctl is-active -q agentd-broker.socket && systemctl is-active -q agentd-approve.socket
 check broker_ready_at_boot $?
 
-upto 60 console_up; sleep 3
-wm=$(pgrep -u agentos -x labwc); con=$(pgrep -u agentos -f '^/usr/bin/agentd console')
-systemctl is-active -q agentos-kiosk && pgrep -u agentos -x foot >/dev/null && [ -n "$wm" ] &&
-	readlink /proc/"$con"/fd/0 | grep -q '^/dev/pts/'; check kiosk_on_screen $?
-# Detection only: labwc (libinput) holds the USB keyboard and tablet open.
-[ "$(ls -l /proc/"$wm"/fd | grep -c '/dev/input/event')" -ge 2 ]; check input_devices $?
-# The desktop for the person: panel, file manager, and a document double-click goes through agentd.
-pgrep -u agentos -x waybar >/dev/null; check desktop_panel $?
-as_person() { runuser -u agentos -- env HOME=/home/agentos XDG_RUNTIME_DIR=/run/user/1000 WAYLAND_DISPLAY=wayland-0 "$@"; }
-as_person pcmanfm & sleep 4; pgrep -u agentos -x pcmanfm >/dev/null; check file_manager_opens $?
+# P1/P2 first boot: GNOME's login manager on the screen, no account in the image, so gnome-initial-setup runs.
+upto 60 systemctl is-active -q gdm; check gdm_on_screen $?
+[ -z "$(getent passwd | awk -F: '$3 >= 1000 && $3 < 60000')" ]; check no_account_in_image $?
+upto 120 pgrep -u gnome-initial-setup -f /usr/libexec/gnome-initial-setup >/dev/null; check initial_setup_on_screen $?
+sleep 8; echo "SHOT setup"; sleep 4
+# The account, created the way gnome-initial-setup creates it (AccountsService, administrator), and its "done" mark.
+busctl call org.freedesktop.Accounts /org/freedesktop/Accounts org.freedesktop.Accounts CreateUser ssi person 'Test Person' 1 >/dev/null
+U=$(id -u person); H=/home/person
+runuser -u person -- sh -c 'mkdir -p ~/.config && echo yes >~/.config/gnome-initial-setup-done'
+in_group() { id -nG person | tr ' ' '\n' | grep -qx agentd-users; }
+upto 15 in_group; check person_joins_agentd_users $?
+# Log in (the test cannot type a password into GDM: automatic login, then the person's real GNOME session).
+printf '[daemon]\nAutomaticLoginEnable=true\nAutomaticLogin=person\n' >/etc/gdm3/daemon.conf
+systemctl restart gdm
+upto 120 pgrep -u person -x gnome-shell >/dev/null && upto 60 test -S /run/user/$U/wayland-0; check gnome_session $?
+as_person() { runuser -u person -- env HOME=$H XDG_RUNTIME_DIR=/run/user/$U DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/$U/bus WAYLAND_DISPLAY=wayland-0 XDG_CURRENT_DESKTOP=GNOME "$@"; }
+upto 30 systemctl is-active -q agentd-apps@$U.socket; check runner_at_login $?
+[ "$(stat -c %a:%U /run/agentd-apps/$U.approve.sock)" = 600:person ] && [ "$(stat -c %a:%G /run/agentd-apps/$U.sock)" = 660:agentd-apps ]
+check runner_approvals_person_only $?
+# First login offers the key step only while the agent has no key.
+sleep 10
+if [ -e /etc/agentd/gemini.env ]; then ! pgrep -u person -x zenity >/dev/null; else pgrep -u person -x zenity >/dev/null; fi; check key_step $?
+pkill -u person -x zenity
+as_person gsettings get org.gnome.shell favorite-apps | grep -q "'agentos-agent.desktop'"; check agent_in_dock $?
+
+# The desktop without the agent: agentd, the broker and this person's runner are stopped while Settings, lock and Files are used.
+systemctl stop agentd.socket agentd.service agentd-broker.socket agentd-approve.socket agentd-apps@$U.socket agentd-apps-approve@$U.socket
+r=0; for p in wifi display sound keyboard system; do
+	as_person gnome-control-center "$p" >/dev/null 2>&1 & sleep 5
+	pgrep -u person -f gnome-control-center >/dev/null || { r=1; echo "Settings $p did not stay open"; }
+	pkill -u person -f gnome-control-center; sleep 1
+done; check settings_panels_without_agent $r
+SID=$(loginctl show-user person -p Display --value)
+active() { as_person gdbus call --session --dest org.gnome.ScreenSaver --object-path /org/gnome/ScreenSaver --method org.gnome.ScreenSaver.GetActive; }
+locked() { active | grep -q true; }; unlocked() { active | grep -q false; }
+loginctl lock-session "$SID"; upto 10 locked; l=$?; loginctl unlock-session "$SID"; upto 10 unlocked; [ $l = 0 ] && [ $? = 0 ]; check lock_unlock_without_agent $?
+as_person nautilus --new-window >/dev/null 2>&1 & sleep 6; pgrep -u person -x nautilus >/dev/null; check file_manager_without_agent $?
+pkill -u person -x nautilus
+systemctl start agentd.socket agentd-broker.socket agentd-approve.socket agentd-apps@$U.socket agentd-apps-approve@$U.socket agentd.service
+
 [ "$(as_person xdg-mime query default application/vnd.oasis.opendocument.text)" = agentos-open.desktop ]; check doc_click_via_agentd $?
 # The agent's finished work appears on the screen: the runner (no display of its own) opens a committed document.
-r=$(runuser -u agentos -- env HOME=/home/agentos AGENTD_WORKSPACE=/home/agentos agentd apps run libreoffice.create_text output=shown.odt title=Shown body='Made by the agent' 2>&1)
+r=$(runuser -u person -- env HOME=$H AGENTD_WORKSPACE=$H agentd apps run libreoffice.create_text output=shown.odt title=Shown body='Made by the agent' 2>&1)
 echo "$r" | tr -d '\n ' | cut -c1-300
-echo "$r" | grep -q '"opened"' && pgrep -u agentos -f 'soffice.*agentd-live' >/dev/null; check agent_work_on_screen $?
-echo SHOT_NOW
-sleep 10; pkill -u agentos -x pcmanfm; pkill -u agentos -f soffice; sleep 2 # the typed request below must reach the console
+echo "$r" | grep -q '"opened"' && upto 20 pgrep -u person -f 'soffice.*agentd-live' >/dev/null; check agent_work_on_screen $?
+sleep 10; echo "SHOT desktop"; sleep 4
+pkill -u person -f soffice; sleep 2
+# The Agent app from the app grid: the console in a terminal window, focused, so the typed request reaches it.
+as_person gio launch /usr/share/applications/agentos-agent.desktop
+console_up() { pgrep -u person -f '^/usr/bin/agentd console' >/dev/null; }
+upto 30 console_up; check agent_app_opens $?
+sleep 4
 
 if [ -e /etc/agentd/gemini.env ]; then
 	[ ! -e /boot/firmware/gemini.env ] && [ "$(stat -c %a:%U /etc/agentd/gemini.env)" = 600:root ] &&
-		journal | grep AGENTD_READY | grep -q '"planner":"live"'; check key_imported $?
+		journal | grep AGENTD_READY | tail -1 | grep -q '"planner":"live"'; check key_imported $?
 fi
 mark=$(date +%s)
 echo TYPE_NOW
 typed() { journalctl -b -u agentd -o cat --no-pager --since "@$mark" | grep -q TASK_COMPLETE; }
 upto 90 typed; check typed_on_screen $?
+echo "SHOT typed"
 if [ -e /etc/agentd/gemini.env ]; then
 	journalctl -b -u agentd -o cat --no-pager --since "@$mark" | grep -v PLANNER_TRY | cut -c1-300 # which route the model took
 	journalctl -b -u agentd -o cat --no-pager --since "@$mark" | grep STEP_VERIFIED | grep -q 'TYPED ON SCREEN'
@@ -111,14 +149,14 @@ if [ -e /etc/agentd/gemini.env ]; then
 	agentd ask 'Hello! Please reply with the word pineapple-seven.' >/run/chat.out 2>&1
 	grep CHAT_REPLY /run/chat.out | grep -q 'gemini' && grep -qi pineapple-seven /run/chat.out; check chat_reply $?
 	! journalctl -b -o cat --no-pager | grep -qi pineapple-seven; check chat_not_logged $?
-	# The agent's terminal (as the person, never root) and software without a new image (broker, approved on the console).
-	printf 'Use the shell to create a folder named demo-dir in my home folder\n' | runuser -u agentos -- agentd console >/run/sh.out 2>&1
+	# The agent's terminal (as the person who asked, never root) and software without a new image (broker, approved on the console).
+	printf 'Use the shell to create a folder named demo-dir in my home folder\n' | runuser -u person -- agentd console >/run/sh.out 2>&1
 	cut -c1-200 /run/sh.out | tail -n 6
-	[ -d /home/agentos/demo-dir ] && [ "$(stat -c %U /home/agentos/demo-dir)" = agentos ]; check agent_shell_as_person $?
-	printf 'Install the Debian package sl\nyes\n' | runuser -u agentos -- agentd console >/run/pkg.out 2>&1
+	[ -d $H/demo-dir ] && [ "$(stat -c %U $H/demo-dir)" = person ]; check agent_shell_as_person $?
+	printf 'Install the Debian package sl\nyes\n' | runuser -u person -- agentd console >/run/pkg.out 2>&1
 	cut -c1-200 /run/pkg.out | tail -n 8
 	dpkg-query -W -f='${Status}' sl 2>/dev/null | grep -q 'install ok installed' && grep -q '"op":"Install"' /var/log/agentd-broker/audit.jsonl; check agent_installs_package $?
-	printf 'Install the Debian package cowsay\nno\n' | runuser -u agentos -- agentd console >/run/pkg2.out 2>&1
+	printf 'Install the Debian package cowsay\nno\n' | runuser -u person -- agentd console >/run/pkg2.out 2>&1
 	! dpkg-query -W -f='${Status}' cowsay 2>/dev/null | grep -q 'ok installed'; check install_refused_without_yes $?
 fi
 
@@ -132,21 +170,22 @@ ip netns exec ap sh -c 'ip link set lo up; ip link set wlan1 up; ip addr add 10.
 	hostapd -B /run/ap.conf >/dev/null; dnsmasq --interface=wlan1 --bind-interfaces --port=0 --dhcp-range=10.77.0.10,10.77.0.50,1h'
 seen() { nmcli dev wifi rescan >/dev/null 2>&1; nmcli -t -f SSID dev wifi list | grep -qx agentos-test; }
 upto 30 seen || echo "access point not seen"
-out=$(printf 'wifi\nagentos-test\nwrong-password-1\nwifi\nagentos-test\ncorrect-horse-9\n' | runuser -u agentos -- agentd console)
+out=$(printf 'wifi\nagentos-test\nwrong-password-1\nwifi\nagentos-test\ncorrect-horse-9\n' | systemd-run -M person@ --user --pipe --quiet --wait agentd console)
+# ^ in the person's own user manager, as GNOME starts apps: polkit sees their active local session (runuser would not).
 echo "$out"
-echo "$out" | grep -q 'Could not join agentos-test' && echo "$out" | grep -q 'Nothing was saved'; check wifi_wrong_password $?
+echo "$out" | grep -q 'Could not join agentos-test' && echo "$out" | grep -q 'Nothing was saved' && ! echo "$out" | grep -q 'Not authorized'; check wifi_wrong_password $?
 echo "$out" | grep -q 'Connected to agentos-test' && nmcli -t -f NAME,DEVICE con show --active | grep -qx agentos-test:wlan0 &&
 	ip -4 addr show wlan0 | grep -q 'inet 10.77.0.'; check wifi_joined $?
 f=$(grep -l '^ssid=agentos-test' /etc/NetworkManager/system-connections/* 2>/dev/null)
 [ "$(echo "$f" | grep -c .)" = 1 ] && [ "$(stat -c %a:%U "$f")" = 600:root ] &&
 	! journalctl -b -o cat --no-pager | grep -q -e correct-horse-9 -e wrong-password-1; check wifi_saved_root_only $?
 
-systemctl start agentos-bootlog.service && grep -q 'agentos-kiosk' /boot/firmware/agentos-journal.txt; check bootlog_on_fat $?
+systemctl start agentos-bootlog.service && grep -q 'gdm' /boot/firmware/agentos-journal.txt; check bootlog_on_fat $?
 if [ -e /etc/agentd/gemini.env ]; then
 	key=$(sed -n 's/^GEMINI_API_KEY=//p' /etc/agentd/gemini.env)
 	! journalctl -b -o cat --no-pager | grep -qF "$key" && ! grep -qF "$key" /boot/firmware/agentos-journal.txt; check key_not_logged $?
 fi
-[ $failed = 0 ] || { systemctl --failed --no-pager; journalctl -b --no-pager -o short-monotonic -u agentd -u agentos-kiosk -u NetworkManager | tail -60; }
+[ $failed = 0 ] || { systemctl --failed --no-pager; journalctl -b --no-pager -o short-monotonic -u agentd -u gdm -u 'agentd-apps@*' -u NetworkManager | tail -60; }
 echo GUEST_DONE
 systemctl poweroff
 GUEST
@@ -156,18 +195,22 @@ mcopy -i "$ESP" "$S/guest.sh" ::/guest.sh
 KEYS="shift-u p p e r minus c a s e spc t h e spc t e x t shift-semicolon spc t y p e d spc o n spc s c r e e n ret"
 : >"$O/serial.log"
 (
-	for _ in $(seq 240); do grep -q SHOT_NOW "$O/serial.log" 2>/dev/null && break; sleep 1; done
-	sleep 6; printf 'screendump %s/screen.ppm\n' "$O" | socat - UNIX-CONNECT:"$S/mon" >/dev/null 2>&1 # the desktop, for human eyes
-	for _ in $(seq 240); do grep -q TYPE_NOW "$O/serial.log" 2>/dev/null && break; sleep 1; done
+	shot() { # the screen, for human eyes
+		for _ in $(seq 400); do grep -q "SHOT $1" "$O/serial.log" 2>/dev/null && break; sleep 1; done
+		printf 'screendump %s/%s.ppm\n' "$O" "$1" | socat - UNIX-CONNECT:"$S/mon" >/dev/null 2>&1
+	}
+	shot setup; shot desktop
+	for _ in $(seq 400); do grep -q TYPE_NOW "$O/serial.log" 2>/dev/null && break; sleep 1; done
 	if [ "$("$ROOT/scripts/debug-server.py" send 'id -u; cat /proc/1/comm' --wait 30 | tr '\n' ' ')" = "0 systemd " ]; then echo "CHECK debug_command ok"; else echo "CHECK debug_command fail"; fi >"$S/host.checks"
-	grep -q 'agentos-kiosk' "$DEBUG_DIR/pi.log" && echo "CHECK debug_journal ok" >>"$S/host.checks" || echo "CHECK debug_journal fail" >>"$S/host.checks"
+	grep -q 'gdm' "$DEBUG_DIR/pi.log" && echo "CHECK debug_journal ok" >>"$S/host.checks" || echo "CHECK debug_journal fail" >>"$S/host.checks"
 	python3 -I -c 'import socket, sys, time
 s = socket.socket(socket.AF_UNIX); s.connect(sys.argv[1])
 for k in sys.argv[2].split():
     s.sendall(b"sendkey %s\n" % k.encode()); time.sleep(0.08)
 time.sleep(0.5)' "$S/mon" "$KEYS"
+	shot typed
 ) & KEYS_PID=$!
-timeout -s KILL 420 qemu-system-x86_64 -enable-kvm -cpu host -m 2048 -smp 2 -snapshot -no-reboot \
+timeout -s KILL 720 qemu-system-x86_64 -enable-kvm -cpu host -m 3072 -smp 2 -snapshot -no-reboot \
 	-drive if=pflash,format=raw,readonly=on,file=/usr/share/OVMF/OVMF_CODE_4M.fd -drive if=pflash,format=raw,file="$S/vars.fd" \
 	-drive file="$S/disk.img",if=virtio,format=raw -nic user,model=virtio-net-pci \
 	-vga none -device virtio-gpu-pci -device qemu-xhci -device usb-kbd -device usb-tablet -display none \

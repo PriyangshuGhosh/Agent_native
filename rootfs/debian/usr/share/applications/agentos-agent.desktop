@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=Agent
+Comment=Ask the agent in plain words; it plans, checks every step and tells you what happened
+Exec=kgx -- /usr/bin/agentd console
+Icon=utilities-terminal
+Categories=System;Utility;
+Keywords=agent;assistant;AI;

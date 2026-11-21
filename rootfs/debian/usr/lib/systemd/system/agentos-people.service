@@ -1,0 +1,9 @@
+[Unit]
+Description=Add people (uid 1000-59999) to group agentd-users
+
+[Service]
+Type=oneshot
+ExecStart=/usr/libexec/agentos/people
+
+[Install]
+WantedBy=multi-user.target

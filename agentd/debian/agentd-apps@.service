@@ -1,23 +1,25 @@
-# The application runner: works as the person's own user (agentos) on the person's own files, with no network.
+# The application runner of one person (instance = their uid): works as that user on their own files, with no network.
+# Started on demand by its sockets, which come up when the person logs in (user-runtime-dir@ drop-in).
 # Each application operation additionally runs inside bubblewrap (agentd/src/apps.rs). PrivateTmp is off on purpose:
 # a live session's control socket (for example LibreOffice's pipe) lives in /tmp.
 # No ProtectKernelTunables: it overmounts parts of /proc, and then bubblewrap may not mount a fresh /proc.
 [Unit]
 Description=CUA-AgentOS application runner
-Requires=agentd-apps.socket agentd-apps-approve.socket
-After=agentd-apps.socket agentd-apps-approve.socket
+Requires=agentd-apps@%i.socket agentd-apps-approve@%i.socket
+After=agentd-apps@%i.socket agentd-apps-approve@%i.socket
 
 [Service]
 ExecStart=/usr/bin/agentd apprunner
-User=agentos
+# systemd sets HOME from the account: the runner's workspace is the person's home.
+User=%i
 # AGENTD_TRUST_GENERATED: growth mode (the person's choice, 2026-11-14): learned capabilities run without a first-use
 # question; `agentd apps review` / `forget` are the review.
-Environment=AGENTD_WORKSPACE=/home/agentos HOME=/home/agentos AGENTD_TRUST_GENERATED=1
+Environment=AGENTD_TRUST_GENERATED=1
 Restart=on-failure
 RestartSec=2
 NoNewPrivileges=yes
 ProtectSystem=strict
-ReadWritePaths=/home/agentos
+ReadWritePaths=/home
 # Network stays for the agent's shell (pip, curl, as the person); application operations still run in bubblewrap
 # with --unshare-all, so they have none. AF_NETLINK: bubblewrap brings up loopback in the namespace it creates.
 RestrictAddressFamilies=AF_UNIX AF_NETLINK AF_INET AF_INET6
